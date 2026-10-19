@@ -101,8 +101,9 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   if (camera.aspect < 1) {
-    // Portrait framing is computed per frame in fitPortrait().
-    camera.fov = 66;
+    // Same camera as desktop; fitPortraitFov() widens the lens each frame to fit the court.
+    camera.fov = 70;
+    camBase = { y: 7.4, z: 15.2, lookZ: -2.2 };
   } else if (isTouch) {
     camera.fov = 44;
     camBase = { y: 7.6, z: 14.4, lookZ: -1.2 };
@@ -1480,18 +1481,13 @@ function updateVisuals(dt) {
 
   // Camera x is in view space; the guest's world is spun 180°.
   const k = Math.min(1, dt * 2.5);
-  if (camera.aspect < 1) {
-    fitPortrait(me);
-    camera.position.lerp(_fitPos, k);
-    camLook.lerp(_fitLook, k);
-  } else {
-    const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (ball.x * 0.25 + ctrlP.pos.x * 0.15) * rightX(me);
-    camera.position.x = lerp(camera.position.x, camX, k);
-    camera.position.y = lerp(camera.position.y, camBase.y, k);
-    camera.position.z = lerp(camera.position.z, camBase.z, k);
-    camLook.set(camera.position.x * 0.4, 0.3, camBase.lookZ);
-  }
+  const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (ball.x * 0.25 + ctrlP.pos.x * 0.15) * rightX(me);
+  camera.position.x = lerp(camera.position.x, camX, k);
+  camera.position.y = lerp(camera.position.y, camBase.y, k);
+  camera.position.z = lerp(camera.position.z, camBase.z, k);
+  camLook.set(camera.position.x * 0.4, 0.3, camBase.lookZ);
   camera.lookAt(camLook);
+  if (camera.aspect < 1) fitPortraitFov(me, k);
   const dc = AUTOPILOT && window.__cam;
   if (dc && dc.follow !== undefined) {
     const fp = players[dc.follow].pos;
@@ -1504,16 +1500,14 @@ function updateVisuals(dt) {
 }
 
 // ---------------------------------------------------------------- portrait camera
-// Portrait screens are narrow, so the camera is fitted every frame: the whole court plus your
-// players (if they run outside) must sit between the HUD at the top and the controls at the bottom.
-// Same viewing angle as the landscape camera (y 7.4, z 15.2 looking at z -2.2).
-const PORTRAIT_PITCH = Math.atan2(7.4 - 0.3, 15.2 + 2.2);
-const _fitPos = new THREE.Vector3(), _fitLook = new THREE.Vector3();
+// Portrait uses the exact desktop camera; only the lens widens until the whole court (plus your
+// players, if they run outside) fits between the HUD at the top and the controls at the bottom.
 const FIT_COURT = [
   [-5, 0, 10.2], [5, 0, 10.2], [-5, 0, -10], [5, 0, -10], [-5, 4, -10], [5, 4, -10], [-5, 3, 0], [5, 3, 0],
 ];
 const fitPts = [];
-function fitPortrait(me) {
+const _fp = new THREE.Vector3();
+function fitPortraitFov(me, k) {
   fitPts.length = 0;
   for (const p of FIT_COURT) fitPts.push(p);
   if (mode !== 'menu') {
@@ -1529,48 +1523,19 @@ function fitPortrait(me) {
   const topPx = hudOn ? $('scoreboard').offsetTop + $('scoreboard').offsetHeight + 6 : 16;
   const botPx = hudOn && isTouch ? h * 0.1 : 12;
   const mTop = (2 * topPx) / h, mBot = (2 * botPx) / h, mSide = 0.03;
-  const th = Math.tan((camera.fov * Math.PI) / 360), tw = th * camera.aspect;
-  const s = Math.sin(PORTRAIT_PITCH), c = Math.cos(PORTRAIT_PITCH);
-  let minX = Infinity, maxX = -Infinity;
-  for (const p of fitPts) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]); }
-  const cx = (minX + maxX) / 2;
-  const fits = (tz, d) => {
-    const cy = d * s, cz = tz + d * c;
-    let lo = Infinity, hi = -Infinity;
-    for (const [x, y, z] of fitPts) {
-      const vx = x - cx, vy = y - cy, vz = z - cz;
-      const depth = -s * vy - c * vz;
-      if (depth < 1) return false;
-      const ny = (c * vy - s * vz) / (depth * th);
-      if (Math.abs(vx / (depth * tw)) > 1 - mSide || ny > 1 - mTop || ny < -1 + mBot) return false;
-      lo = Math.min(lo, ny); hi = Math.max(hi, ny);
-    }
-    fitSpan = (lo + hi) / 2;
-    return true;
-  };
-  let bestD = Infinity;
-  for (let tz = -10; tz <= 8; tz += 0.25) {
-    let lo = 3, hi = 90;
-    if (!fits(tz, hi)) continue;
-    for (let i = 0; i < 16; i++) {
-      const mid = (lo + hi) / 2;
-      if (fits(tz, mid)) hi = mid; else lo = mid;
-    }
-    bestD = Math.min(bestD, hi);
+  camera.updateMatrixWorld();
+  let need = 0.1;
+  for (const [x, y, z] of fitPts) {
+    _fp.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+    const depth = -_fp.z;
+    if (depth < 0.5) continue;
+    need = Math.max(need, Math.abs(_fp.x) / depth / camera.aspect / (1 - mSide));
+    need = Math.max(need, _fp.y > 0 ? _fp.y / depth / (1 - mTop) : -_fp.y / depth / (1 - mBot));
   }
-  if (!isFinite(bestD)) bestD = 30;
-  // At the closest distance that works, centre the court in the space between HUD and controls.
-  const d = bestD * 1.02, band = (mBot - mTop) / 2;
-  let bestZ = 0, bestOff = Infinity;
-  for (let tz = -10; tz <= 8; tz += 0.1) {
-    if (!fits(tz, d)) continue;
-    const off = Math.abs(fitSpan - band);
-    if (off < bestOff) { bestOff = off; bestZ = tz; }
-  }
-  _fitLook.set(cx, 0, bestZ);
-  _fitPos.set(cx, d * s, bestZ + d * c);
+  const fov = clamp((Math.atan(need) * 360) / Math.PI, 30, 110);
+  camera.fov = lerp(camera.fov, fov, k);
+  camera.updateProjectionMatrix();
 }
-let fitSpan = 0;
 
 // ---------------------------------------------------------------- HUD & menus
 function setHint(t) {
