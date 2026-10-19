@@ -102,7 +102,7 @@ function resize() {
   camera.aspect = w / h;
   if (camera.aspect < 1) {
     // Portrait framing is computed per frame in fitPortrait().
-    camera.fov = 50;
+    camera.fov = 66;
   } else if (isTouch) {
     camera.fov = 44;
     camBase = { y: 7.6, z: 14.4, lookZ: -1.2 };
@@ -1506,7 +1506,8 @@ function updateVisuals(dt) {
 // ---------------------------------------------------------------- portrait camera
 // Portrait screens are narrow, so the camera is fitted every frame: the whole court plus your
 // players (if they run outside) must sit between the HUD at the top and the controls at the bottom.
-const PORTRAIT_PITCH = 0.98;
+// Same viewing angle as the landscape camera (y 7.4, z 15.2 looking at z -2.2).
+const PORTRAIT_PITCH = Math.atan2(7.4 - 0.3, 15.2 + 2.2);
 const _fitPos = new THREE.Vector3(), _fitLook = new THREE.Vector3();
 const FIT_COURT = [
   [-5, 0, 10.2], [5, 0, 10.2], [-5, 0, -10], [5, 0, -10], [-5, 4, -10], [5, 4, -10], [-5, 3, 0], [5, 3, 0],
@@ -1535,30 +1536,41 @@ function fitPortrait(me) {
   const cx = (minX + maxX) / 2;
   const fits = (tz, d) => {
     const cy = d * s, cz = tz + d * c;
+    let lo = Infinity, hi = -Infinity;
     for (const [x, y, z] of fitPts) {
       const vx = x - cx, vy = y - cy, vz = z - cz;
       const depth = -s * vy - c * vz;
       if (depth < 1) return false;
       const ny = (c * vy - s * vz) / (depth * th);
       if (Math.abs(vx / (depth * tw)) > 1 - mSide || ny > 1 - mTop || ny < -1 + mBot) return false;
+      lo = Math.min(lo, ny); hi = Math.max(hi, ny);
     }
+    fitSpan = (lo + hi) / 2;
     return true;
   };
-  let bestD = Infinity, bestZ = 0;
-  for (let tz = -6; tz <= 6; tz += 0.25) {
+  let bestD = Infinity;
+  for (let tz = -10; tz <= 8; tz += 0.25) {
     let lo = 3, hi = 90;
     if (!fits(tz, hi)) continue;
     for (let i = 0; i < 16; i++) {
       const mid = (lo + hi) / 2;
       if (fits(tz, mid)) hi = mid; else lo = mid;
     }
-    // Among equally close framings prefer the most centred one.
-    if (hi < bestD - 0.05 || (hi < bestD + 0.05 && Math.abs(tz) < Math.abs(bestZ))) { bestD = Math.min(bestD, hi); bestZ = tz; }
+    bestD = Math.min(bestD, hi);
   }
-  if (!isFinite(bestD)) { bestD = 30; bestZ = 0; }
+  if (!isFinite(bestD)) bestD = 30;
+  // At the closest distance that works, centre the court in the space between HUD and controls.
+  const d = bestD * 1.02, band = (mBot - mTop) / 2;
+  let bestZ = 0, bestOff = Infinity;
+  for (let tz = -10; tz <= 8; tz += 0.1) {
+    if (!fits(tz, d)) continue;
+    const off = Math.abs(fitSpan - band);
+    if (off < bestOff) { bestOff = off; bestZ = tz; }
+  }
   _fitLook.set(cx, 0, bestZ);
-  _fitPos.set(cx, bestD * s, bestZ + bestD * c);
+  _fitPos.set(cx, d * s, bestZ + d * c);
 }
+let fitSpan = 0;
 
 // ---------------------------------------------------------------- HUD & menus
 function setHint(t) {
