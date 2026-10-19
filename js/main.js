@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { BALL_R, COURT, DOOR, makeBall, cloneBall, stepBall, solveShot } from './physics.js';
-import { Character, LOOKS, strokeLead } from './character.js';
+import { Character, LOOKS, STROKE_TIMING, strokeLead } from './character.js';
 import { Sfx } from './audio.js';
 import * as Store from './store.js';
+import { Link, CODE_LEN, normalizeCode } from './net.js';
 
 // Real padel physics, played back slightly slower than real time.
 const GAME_SPEED = 0.8;
@@ -37,6 +38,32 @@ const gauss = () => Math.sqrt(-2 * Math.log(Math.random() || 1e-9)) * Math.cos(2
 const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 // Dev aid: ?autopilot lets the AI play your team too.
 const AUTOPILOT = new URLSearchParams(location.search).has('autopilot');
+
+// Online play: the host runs the whole simulation; the guest drives team 1 and renders snapshots.
+const net = {
+  role: null, link: null, code: '',
+  remoteAxis: { x: 0, y: 0 }, remoteAuto: false, guestColor: null,
+  snaps: [], queue: [], renderT: null, lastSnap: 0, lastIn: { x: 0, y: 0, t: 0 },
+  lastRecv: 0, lastSent: 0, marks: { b: null, i: null }, rematch: { me: false, them: false },
+};
+const NET_INTERP = 0.07;
+const NET_TIMEOUT = 15000;
+const myTeam = () => (net.role === 'guest' ? 1 : 0);
+// Teams with a human-style controller (control ring, manual switching) vs. the CPU side.
+const humanSide = (t) => t === 0 || net.role === 'host';
+const isHuman = (t) => humanSide(t) && !(t === 0 && AUTOPILOT);
+const aiTeam = (t) => !humanSide(t);
+
+function netSend(msg) {
+  if (!net.link) return;
+  net.link.send(msg);
+  net.lastSent = performance.now();
+}
+function hostSend(msg) {
+  if (net.role !== 'host') return;
+  msg.st = simTime;
+  netSend(msg);
+}
 
 const save = Store.load();
 let diffKey = DIFF[save.lastDifficulty] ? save.lastDifficulty : 'medium';
@@ -163,7 +190,7 @@ function buildCourt() {
     side: THREE.DoubleSide, depthWrite: false,
   });
   // Camera-side panels are faint so they don't block the view of your own half.
-  const fence = (w, h, faint = false) => {
+  const fenceMat = (w, h, faint = false) => {
     const t = fenceTex.clone();
     t.repeat.set(w / 0.35, h / 0.35);
     t.needsUpdate = true;
@@ -173,36 +200,43 @@ function buildCourt() {
     });
   };
 
+  const fencePlane = (w, h, x, y, z, rotY = 0) => {
+    const m = plane(w, h, fenceMat(w, h), x, y, z, rotY);
+    viewSwap.push({ mesh: m, z, solid: m.material, faint: fenceMat(w, h, true), shadow: false });
+  };
   for (const s of [-1, 1]) {
-    const near = s > 0;
     plane(2 * W, 3, glassMat, 0, 1.5, s * L);
-    plane(2 * W, 1, fence(2 * W, 1, near), 0, 3.5, s * L);
+    fencePlane(2 * W, 1, 0, 3.5, s * L);
     for (const sx of [-1, 1]) {
       plane(2, 3, glassMat, sx * W, 1.5, s * 9, Math.PI / 2);
-      plane(2, 1, fence(2, 1, near), sx * W, 3.5, s * 9, Math.PI / 2);
+      fencePlane(2, 1, sx * W, 3.5, s * 9, Math.PI / 2);
       plane(2, 2, glassMat, sx * W, 1, s * 7, Math.PI / 2);
-      plane(2, 1, fence(2, 1, near), sx * W, 2.5, s * 7, Math.PI / 2);
+      fencePlane(2, 1, sx * W, 2.5, s * 7, Math.PI / 2);
     }
   }
   for (const sx of [-1, 1]) {
     const z0 = DOOR.z0, z1 = DOOR.z1, dw = z1 - z0;
-    for (const [a, b] of [[-6, -z1], [-z0, z0], [z1, 6]]) plane(b - a, 3, fence(b - a, 3), sx * W, 1.5, (a + b) / 2, Math.PI / 2);
-    for (const s of [-1, 1]) plane(dw, 3 - DOOR.h, fence(dw, 3 - DOOR.h), sx * W, (3 + DOOR.h) / 2, s * (z0 + z1) / 2, Math.PI / 2);
+    for (const [a, b] of [[-6, -z1], [-z0, z0], [z1, 6]]) plane(b - a, 3, fenceMat(b - a, 3), sx * W, 1.5, (a + b) / 2, Math.PI / 2);
+    for (const s of [-1, 1]) plane(dw, 3 - DOOR.h, fenceMat(dw, 3 - DOOR.h), sx * W, (3 + DOOR.h) / 2, s * (z0 + z1) / 2, Math.PI / 2);
   }
 
   const solidFrame = new THREE.MeshStandardMaterial({ color: 0x12161c, roughness: 0.5, metalness: 0.6 });
   const faintFrame = new THREE.MeshStandardMaterial({ color: 0x12161c, transparent: true, opacity: 0.25, depthWrite: false });
   const frameMat = solidFrame;
-  const post = (x, z, h) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.08, h, 0.08), z > 5 ? faintFrame : solidFrame);
-    m.position.set(x, h / 2, z);
-    m.castShadow = z <= 5;
+  const frame = (m, z, shadow) => {
+    m.castShadow = shadow;
+    if (Math.abs(z) > 5) viewSwap.push({ mesh: m, z, solid: solidFrame, faint: faintFrame, shadow });
     scene.add(m);
   };
+  const post = (x, z, h) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.08, h, 0.08), solidFrame);
+    m.position.set(x, h / 2, z);
+    frame(m, z, true);
+  };
   const rail = (x, y, z, lx, lz) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(lx || 0.05, 0.05, lz || 0.05), z > 5 ? faintFrame : solidFrame);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(lx || 0.05, 0.05, lz || 0.05), solidFrame);
     m.position.set(x, y, z);
-    scene.add(m);
+    frame(m, z, false);
   };
   for (let z = -L; z <= L; z += 2) for (const sx of [-1, 1]) post(sx * W, z, Math.abs(z) >= 8 ? 4 : 3);
   for (let x = -W; x <= W; x += 2.5) for (const s of [-1, 1]) post(x, s * L, 4);
@@ -261,7 +295,20 @@ function buildCourt() {
     scene.add(s);
   }
 }
+const viewSwap = [];
 buildCourt();
+
+// The guest watches from the far end: spin the world and fade the fences nearest their camera.
+function setViewSide(team) {
+  const s = sideZ(team);
+  scene.rotation.y = team === 0 ? 0 : Math.PI;
+  for (const e of viewSwap) {
+    const near = e.z * s > 5;
+    e.mesh.material = near ? e.faint : e.solid;
+    e.mesh.castShadow = e.shadow && !near;
+  }
+}
+setViewSide(0);
 
 // ---------------------------------------------------------------- ball & markers
 const ball = makeBall();
@@ -305,9 +352,26 @@ function makePlayer(team, idx) {
 const players = [makePlayer(0, 0), makePlayer(0, 1), makePlayer(1, 0), makePlayer(1, 1)];
 const teamPlayers = (t) => [players[t * 2], players[t * 2 + 1]];
 
+// Host forwards every animation cue so the guest's characters move identically.
+players.forEach((p, i) => {
+  const ch = p.ch;
+  const { startSwing, cancelSwing, splitStep, grunt } = ch;
+  ch.startSwing = (anim, side, c, now, ct, opts = {}) => {
+    startSwing.call(ch, anim, side, c, now, ct, opts);
+    hostSend({ t: 'sw', i, anim, side, c: [c.x, c.y, c.z], ct, j: opts.jump || 0 });
+  };
+  ch.cancelSwing = () => { cancelSwing.call(ch); hostSend({ t: 'cs', i }); };
+  ch.splitStep = () => { splitStep.call(ch); hostSend({ t: 'ss', i }); };
+  ch.grunt = (v) => { grunt.call(ch, v); hostSend({ t: 'gr', i, v }); };
+});
+
+const myRacketColor = () => Store.racketTier(save.upgrades).color;
+function setRackets(c0, c1 = null) {
+  for (const p of teamPlayers(0)) p.ch.setRacketColor(c0);
+  for (const p of teamPlayers(1)) p.ch.setRacketColor(c1 ?? (p.idx === 0 ? 0x2b2b33 : 0xd03050));
+}
 function applyRacketLook() {
-  const tier = Store.racketTier(save.upgrades);
-  for (const p of teamPlayers(0)) p.ch.setRacketColor(tier.color);
+  setRackets(myRacketColor());
 }
 
 // ---------------------------------------------------------------- audio
@@ -322,8 +386,10 @@ function haptic(ms = 12) {
 // ---------------------------------------------------------------- input
 const keys = new Set();
 const stick = { active: false, id: null, ox: 0, oy: 0, x: 0, y: 0 };
-let hitBuffer = null;
-let manualSwitchT = 0;
+const hitBuffer = [null, null];
+const manualSwitchT = [0, 0];
+const ctrl = [0, 0];
+let netPaused = false;
 
 function inputAxis() {
   let x = 0, y = 0;
@@ -337,28 +403,44 @@ function inputAxis() {
   return { x, y };
 }
 
+// Stick input in world terms: x across the court, y towards the net.
+function axisFor(team) {
+  const a = team === 0 ? inputAxis() : net.remoteAxis;
+  return { x: a.x * rightX(team), y: a.y };
+}
+
 function pressAction(act) {
-  if (mode !== 'playing') return;
-  if (act === 'switch') {
-    controlledIdx = 1 - controlledIdx;
-    manualSwitchT = 1.2;
-    haptic(8);
+  if (mode !== 'playing' || netPaused) return;
+  if (net.role === 'guest') {
+    if (act === 'switch') haptic(8);
+    netSend({ t: 'act', a: act });
     return;
   }
-  if (phase === 'preServe' && serve.team === 0) {
+  actionFor(0, act);
+}
+
+function actionFor(team, act) {
+  if (mode !== 'playing' || !isHuman(team)) return;
+  if (act === 'switch') {
+    ctrl[team] = 1 - ctrl[team];
+    manualSwitchT[team] = 1.2;
+    if (team === 0) haptic(8);
+    return;
+  }
+  if (phase === 'preServe' && serve.team === team) {
     startToss();
     return;
   }
-  hitBuffer = { type: act, t: 0.6 };
+  hitBuffer[team] = { type: act, t: 0.6 };
 }
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape' || e.code === 'KeyP') {
-    if (mode === 'playing') pauseGame();
-    else if (mode === 'paused') resumeGame();
+    if (mode === 'playing' && !netPaused) pauseGame();
+    else if (mode === 'paused' || netPaused) resumeGame();
     return;
   }
-  if (mode !== 'playing') return;
+  if (mode !== 'playing' || netPaused) return;
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].includes(e.code)) e.preventDefault();
   keys.add(e.code);
   if (e.repeat) return;
@@ -431,7 +513,6 @@ let serve = null;
 let serveFaults = 0;
 let serveContactT = 0;
 let lastPointWinner = null;
-let controlledIdx = 0;
 let hitCounter = 0;
 let matchWinner = null;
 let simTime = 0;
@@ -485,16 +566,15 @@ function setupServe() {
   form[R] = 'back';
   rally = null;
   lastPointWinner = null;
-  hitBuffer = null;
-  bounceMarker.visible = interceptMarker.visible = false;
-  if (T === 0) controlledIdx = sv.player.idx;
-  else controlledIdx = rcv.idx;
-  manualSwitchT = 0;
+  hitBuffer[0] = hitBuffer[1] = null;
+  clearMarkers();
+  ctrl[T] = sv.player.idx;
+  ctrl[R] = rcv.idx;
+  manualSwitchT[0] = manualSwitchT[1] = 0;
   phase = 'preServe';
   phaseT = 0;
   updateHud();
-  if (T === 0) setHint(`${serveFaults ? 'Second serve' : 'Your serve'} — ${isTouch ? 'tap DRIVE' : 'press SPACE'} (aim with ${isTouch ? 'stick' : 'arrows'})`);
-  else setHint('');
+  serveHint({ team: T, second: serveFaults > 0 });
 }
 
 const _hold = new THREE.Vector3();
@@ -509,7 +589,7 @@ function startToss() {
   if (phase !== 'preServe') return;
   phase = 'toss';
   phaseT = 0;
-  setHint('');
+  serveHint(null);
   holdBallAtServer();
   Object.assign(ball, { vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0, onGround: false });
   const b = cloneBall(ball);
@@ -530,8 +610,8 @@ function startToss() {
 function doServe() {
   const T = serve.team, p = serve.server, box = serve.boxSign;
   let tx, depth;
-  if (T === 0 && !AUTOPILOT) {
-    const a = inputAxis();
+  if (isHuman(T)) {
+    const a = axisFor(T);
     tx = box * 2.5 + a.x * 1.9;
     depth = 5.3 + a.y * 1.1;
   } else {
@@ -554,7 +634,7 @@ function doServe() {
   p.ch.grunt(0.35);
   phase = 'play';
   phaseT = 0;
-  sfx.hit('drive', 0.7, pan(p.pos.x));
+  play('hit', 'drive', 0.7, pan(p.pos.x));
   afterHit(T, 'serve');
 }
 
@@ -690,7 +770,7 @@ function resolveContact(p, pd) {
     p.cooldown = 0.25;
     return;
   }
-  if (p.team === 1 || AUTOPILOT) aiShot(p, pd);
+  if (!isHuman(p.team)) aiShot(p, pd);
   else humanShot(p, pd);
 }
 
@@ -700,7 +780,7 @@ function updateSwings() {
     if (!pd) continue;
     if (!pd.whooshed && simTime >= pd.time - 0.1) {
       pd.whooshed = true;
-      sfx.whoosh(pd.anim === 'pop' || pd.anim === 'smash' ? 1.3 : pd.anim === 'drop' ? 0.4 : 0.8, pan(p.pos.x));
+      play('whoosh', pd.anim === 'pop' || pd.anim === 'smash' ? 1.3 : pd.anim === 'drop' ? 0.4 : 0.8, pan(p.pos.x));
     }
     if (simTime >= pd.time - DT * 0.5) {
       p.pending = null;
@@ -713,7 +793,7 @@ function updateSwings() {
   const team = teamPlayers(R);
   if (team.some((p) => p.pending)) return;
 
-  if (R === 1) {
+  if (!isHuman(R)) {
     if (rally.cpuIgnore) return;
     for (const p of team) {
       if (!p.plan && team[1 - p.idx].plan) continue;
@@ -721,18 +801,17 @@ function updateSwings() {
     }
     return;
   }
-  const ctrl = team[controlledIdx];
-  for (const p of [ctrl, team[1 - controlledIdx]]) {
+  const ci = ctrl[R];
+  const buf = hitBuffer[R];
+  const auto = R === 0 ? save.settings.autoSwing : net.remoteAuto;
+  for (const p of [team[ci], team[1 - ci]]) {
     let type;
-    if (AUTOPILOT) {
-      if (!p.plan && team[1 - p.idx].plan) continue;
-      type = 'ai';
-    } else if (hitBuffer) type = hitBuffer.type;
-    else if (p === ctrl && save.settings.autoSwing) type = 'drive';
+    if (buf) type = buf.type;
+    else if (p === team[ci] && auto) type = 'drive';
     else continue;
     if (tryCommit(p, type)) {
-      hitBuffer = null;
-      controlledIdx = p.idx;
+      hitBuffer[R] = null;
+      ctrl[R] = p.idx;
       return;
     }
   }
@@ -815,14 +894,16 @@ function finishHit(p, kind, speed) {
   rally.hitId = ++hitCounter;
   phaseT = 0;
   p.cooldown = 0.35;
-  sfx.hit(kind, speed / 25, pan(p.pos.x));
+  play('hit', kind, speed / 25, pan(p.pos.x));
   p.ch.grunt(kind === 'pop' || kind === 'smash' ? 1 : kind === 'drive' || kind === 'bandeja' ? 0.55 : 0.3);
-  if (team === 0) haptic(kind === 'pop' ? 35 : kind === 'smash' ? 25 : 12);
+  const buzz = kind === 'pop' ? 35 : kind === 'smash' ? 25 : 12;
+  if (team === 0) haptic(buzz);
+  else hostSend({ t: 'hap', ms: buzz });
   afterHit(team, kind);
 }
 
 function humanShot(p, pd) {
-  const a = inputAxis();
+  const a = axisFor(p.team);
   const tx = Math.abs(a.x) > 0.2 ? a.x * 3.6 : -ball.x * 0.6;
   const depthAdj = a.y > 0.2 ? a.y * 1.3 : a.y < -0.2 ? a.y * 2.8 : 0;
   performShot(p, pd.kind, tx, depthAdj, pd);
@@ -847,7 +928,7 @@ function afterHit(team, kind) {
   const R = 1 - team;
   for (const p of teamPlayers(team)) p.plan = null;
   for (const p of teamPlayers(R)) p.ch.splitStep();
-  if (team === 1) {
+  if (aiTeam(team)) {
     if (kind === 'lob' || Math.random() < D.netRate) form[1] = 'net';
     else form[1] = 'back';
   }
@@ -957,15 +1038,17 @@ function planTeam(team, fresh) {
   if (team === 0) {
     bounceMarker.visible = save.settings.guides && !!pred.firstBounce;
     if (pred.firstBounce) bounceMarker.position.set(pred.firstBounce.x, 0.008, pred.firstBounce.z);
+  } else if (net.role === 'host') {
+    net.marks.b = pred.firstBounce ? [pred.firstBounce.x, pred.firstBounce.z] : null;
   }
-  if (team === 1 && fresh) {
+  if (aiTeam(team) && fresh) {
     rally.cpuIgnore = pred.endFault && Math.random() < D.smart;
     for (const p of tps) p.reactT = D.reaction;
   }
   for (const p of tps) p.plan = null;
-  if (team === 1 && rally.cpuIgnore) return;
-  const allowOut = team === 0 || rollsFor(tps[0])[2] < 0.3 + D.smart * 0.6;
-  const reaction = team === 1 && fresh ? D.reaction : 0;
+  if (aiTeam(team) && rally.cpuIgnore) return;
+  const allowOut = !aiTeam(team) || rollsFor(tps[0])[2] < 0.3 + D.smart * 0.6;
+  const reaction = aiTeam(team) && fresh ? D.reaction : 0;
   const plans = tps.map((p) => (mayPlay(p) ? bestIntercept(p, pred.samples, reaction, allowOut) : null));
   let chosen = null;
   for (const pl of plans) {
@@ -979,37 +1062,45 @@ function planTeam(team, fresh) {
     chosen.p.plan = chosen;
     if (!rally.serve && chosen.x * chosen.p.lane < -0.8) for (const p of tps) p.lane = -p.lane;
   }
-  if (team === 0) {
-    if (fresh && manualSwitchT <= 0 && chosen) controlledIdx = chosen.p.idx;
-    const mine = plans[controlledIdx];
-    interceptMarker.visible = save.settings.guides && !!mine;
-    if (mine) interceptMarker.position.set(mine.x, 0.007, mine.z);
+  if (humanSide(team)) {
+    if (fresh && manualSwitchT[team] <= 0 && chosen) ctrl[team] = chosen.p.idx;
+    const mine = plans[ctrl[team]];
+    if (team === 0) {
+      interceptMarker.visible = save.settings.guides && !!mine;
+      if (mine) interceptMarker.position.set(mine.x, 0.007, mine.z);
+    } else {
+      net.marks.i = mine ? [mine.x, mine.z] : null;
+    }
   }
+}
+
+function clearMarkers() {
+  bounceMarker.visible = interceptMarker.visible = false;
+  net.marks.b = net.marks.i = null;
 }
 
 function formationTarget(p) {
   const team = p.team;
   const partner = teamPlayers(team)[1 - p.idx];
   let z;
-  if (team === 0 && partner === teamPlayers(0)[controlledIdx]) z = clamp(partner.pos.z, 3.2, 8.2);
+  if (humanSide(team) && partner === teamPlayers(team)[ctrl[team]]) z = sideZ(team) * clamp(Math.abs(partner.pos.z), 3.2, 8.2);
   else z = sideZ(team) * (form[team] === 'net' ? 3.4 : 7.8);
   return { x: p.lane * Math.max(0.9, 2.3 + p.lane * ball.x * 0.2), z };
 }
 
 // ---------------------------------------------------------------- rules
-function pointLabel(t) {
-  const s = score;
+function pointLabel(s, t) {
   if (s.tiebreak) return String(s.points[t]);
   const p = s.points[t], o = s.points[1 - t];
   if (p >= 3 && o >= 3) return !F.golden && p > o ? 'AD' : '40';
   return ['0', '15', '30', '40'][Math.min(p, 3)];
 }
 
-function awardPoint(team, reason) {
+function awardPoint(team, reason, hitter = null) {
   if (phase !== 'play') return;
   const s = score, o = 1 - team;
   s.points[team]++;
-  let title = team === 0 ? 'Point!' : 'Point CPU';
+  let lvl = 'Point';
   let gameWon = false;
   if (s.tiebreak) gameWon = s.points[team] >= 7 && s.points[team] - s.points[o] >= 2;
   else if (F.golden) gameWon = s.points[team] >= 4;
@@ -1021,7 +1112,7 @@ function awardPoint(team, reason) {
     s.totalGames[team]++;
     s.points = [0, 0];
     s.gameIndex++;
-    title = team === 0 ? 'Game!' : 'Game CPU';
+    lvl = 'Game';
     const N = F.games;
     let setWon = wasTB || (s.games[team] >= N && s.games[team] - s.games[o] >= 2);
     if (!setWon && s.games[0] === N && s.games[1] === N) {
@@ -1033,10 +1124,10 @@ function awardPoint(team, reason) {
       s.history.push([...s.games]);
       s.sets[team]++;
       s.games = [0, 0];
-      title = team === 0 ? 'Set!' : 'Set CPU';
+      lvl = 'Set';
       if (s.sets[team] >= F.setsToWin) {
         matchWinner = team;
-        title = team === 0 ? 'Match won!' : 'Match lost';
+        lvl = 'Match';
       }
     }
   }
@@ -1045,17 +1136,14 @@ function awardPoint(team, reason) {
   phaseT = 0;
   lastPointWinner = team;
   for (const p of players) p.pending = null;
-  bounceMarker.visible = interceptMarker.visible = false;
-  showMessage(title, reason, team === 0 ? 'good' : 'bad');
-  const big = gameWon || reason.startsWith('Por tres');
-  if (team === 0) sfx.crowd(big ? 1.3 : 0.8, big);
-  else sfx.crowd(big ? 0.6 : 0.35, false);
-  if (team === 0) haptic(30);
+  clearMarkers();
+  const porTres = reason.startsWith('Por tres');
+  announce({ k: 'point', team, lvl, reason, hitter, big: gameWon || porTres, ooh: porTres });
   updateHud();
 }
 
 function fault(team, reason) {
-  awardPoint(1 - team, reason);
+  awardPoint(1 - team, reason, team);
 }
 
 function serveFault(reason) {
@@ -1067,25 +1155,24 @@ function serveFault(reason) {
   }
   phase = 'serveReset';
   phaseT = 0;
-  bounceMarker.visible = interceptMarker.visible = false;
-  showMessage('Fault', reason, 'neutral');
+  clearMarkers();
+  announce({ k: 'plain', title: 'Fault', reason, tone: 'neutral' });
 }
 
 function serveLet() {
   phase = 'serveReset';
   phaseT = 0;
-  showMessage('Let', 'Replay the serve', 'neutral');
+  announce({ k: 'plain', title: 'Let', reason: 'Replay the serve', tone: 'neutral' });
 }
 
 function processEvent(e) {
-  if (e.type === 'ground' || e.type === 'groundOut') sfx.bounce(e.speed, pan(e.x));
-  else if (e.type === 'wall' || e.type === 'wallOutside') (e.surf === 'glass' ? sfx.glass(e.speed, pan(e.x)) : sfx.mesh(e.speed, pan(e.x)));
-  else if (e.type === 'net' || e.type === 'netcord') sfx.net(e.type === 'netcord', pan(e.x));
+  if (e.type === 'ground' || e.type === 'groundOut') play('bounce', e.speed, pan(e.x));
+  else if (e.type === 'wall' || e.type === 'wallOutside') play(e.surf === 'glass' ? 'glass' : 'mesh', e.speed, pan(e.x));
+  else if (e.type === 'net' || e.type === 'netcord') play('net', e.type === 'netcord', pan(e.x));
 
   if (phase === 'toss') return;
   if (phase !== 'play' || !rally) return;
   const T = rally.lastHit;
-  const hitterName = T === 0 ? 'Your' : 'CPU';
   switch (e.type) {
     case 'netcord':
       if (rally.serve) rally.netTouch = true;
@@ -1103,6 +1190,7 @@ function processEvent(e) {
         }
         rally.valid = true;
         bounceMarker.visible = false;
+        net.marks.b = null;
         planTeam(1 - T, false);
       } else {
         return awardPoint(T, s === T ? 'Came back over!' : 'Double bounce');
@@ -1113,7 +1201,7 @@ function processEvent(e) {
       const s = sideOf(e.z);
       if (!rally.valid) {
         if (rally.serve) return serveFault('Hit the wall first');
-        if (s !== T) return fault(T, `${hitterName} shot hit the ${e.surf === 'glass' ? 'glass' : 'fence'} on the full`);
+        if (s !== T) return fault(T, `{hitter} shot hit the ${e.surf === 'glass' ? 'glass' : 'fence'} on the full`);
       } else if (rally.serve && e.surf === 'mesh') {
         return serveFault('Serve hit the fence');
       }
@@ -1126,7 +1214,7 @@ function processEvent(e) {
         if (sideExit(e)) {
           rally.outPlay = true;
           planTeam(1 - T, false);
-          if (T === 1) showMessage('Out of the court!', 'Run out through the door', 'neutral');
+          announce({ k: 'chase', team: 1 - T });
           break;
         }
         return awardPoint(T, winnerOutReason(T));
@@ -1139,11 +1227,8 @@ function processEvent(e) {
   }
 }
 
-function winnerOutReason(T) {
-  if (rally.lastKind === 'pop' || rally.lastKind === 'smash') {
-    if (T === 1) sfx.ooh();
-    return 'Por tres! Smashed out of the court';
-  }
+function winnerOutReason() {
+  if (rally.lastKind === 'pop' || rally.lastKind === 'smash') return 'Por tres! Smashed out of the court';
   return 'Out of the court — winner!';
 }
 
@@ -1182,16 +1267,15 @@ function seek(p, dt, tx, tz, slow = 1) {
 }
 
 function updatePlayers(dt) {
-  const ctrl = teamPlayers(0)[controlledIdx];
   for (const p of players) {
     p.cooldown = Math.max(0, p.cooldown - dt);
     // Players plant their feet while swinging.
     const slow = p.pending ? 0.3 : p.ch.swinging ? 0.6 : 1;
-    if (p === ctrl && !AUTOPILOT) {
-      const a = inputAxis();
-      movePlayer(p, dt, a.x * p.speedMax * slow, -a.y * p.speedMax * slow);
+    if (isHuman(p.team) && p === teamPlayers(p.team)[ctrl[p.team]]) {
+      const a = axisFor(p.team);
+      movePlayer(p, dt, a.x * p.speedMax * slow, -sideZ(p.team) * a.y * p.speedMax * slow);
       // If you deliberately run deep into your partner's half, they swap over to cover yours.
-      const partner = teamPlayers(0)[1 - controlledIdx];
+      const partner = teamPlayers(p.team)[1 - ctrl[p.team]];
       const crossed = !isOut(p.pos.x) && Math.sign(p.pos.x) === partner.lane && Math.abs(p.pos.x) > 1.4;
       p.crossT = crossed ? p.crossT + dt : 0;
       if (p.crossT > 0.5) {
@@ -1230,20 +1314,21 @@ function stepBallAndRules(dt) {
 function simStep(dt) {
   simTime += dt;
   phaseT += dt;
-  if (hitBuffer && (hitBuffer.t -= dt) <= 0) hitBuffer = null;
-  manualSwitchT -= dt;
+  for (const t of [0, 1]) {
+    if (hitBuffer[t] && (hitBuffer[t].t -= dt) <= 0) hitBuffer[t] = null;
+    manualSwitchT[t] -= dt;
+  }
 
   switch (phase) {
     case 'preServe':
       holdBallAtServer();
-      if (serve.team === 1 && phaseT > 1.1) startToss();
-      if (AUTOPILOT && serve.team === 0 && phaseT > 1.1) startToss();
+      if (!isHuman(serve.team) && phaseT > 1.1) startToss();
       break;
     case 'toss':
       stepBallAndRules(dt);
       if (!serve.whooshed && simTime >= serveContactT - 0.1) {
         serve.whooshed = true;
-        sfx.whoosh(0.6, pan(serve.server.pos.x));
+        play('whoosh', 0.6, pan(serve.server.pos.x));
       }
       if (simTime >= serveContactT - DT * 0.5) doServe();
       break;
@@ -1309,15 +1394,17 @@ function updateVisuals(dt) {
     });
   }
 
-  const ctrl = teamPlayers(0)[controlledIdx];
+  const me = myTeam();
+  const ctrlP = teamPlayers(me)[ctrl[me]];
   const showCtrl = mode === 'playing' || mode === 'paused';
   ctrlRing.visible = ctrlArrow.visible = showCtrl;
-  ctrlRing.position.set(ctrl.pos.x, 0.009, ctrl.pos.z);
-  ctrlArrow.position.set(ctrl.pos.x, 2.25 + Math.sin(performance.now() / 200) * 0.05, ctrl.pos.z);
+  ctrlRing.position.set(ctrlP.pos.x, 0.009, ctrlP.pos.z);
+  ctrlArrow.position.set(ctrlP.pos.x, 2.25 + Math.sin(performance.now() / 200) * 0.05, ctrlP.pos.z);
 
-  const tx = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : ball.x * 0.25 + ctrl.pos.x * 0.15;
+  // Camera x is in view space; the guest's world is spun 180°.
+  const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (ball.x * 0.25 + ctrlP.pos.x * 0.15) * rightX(me);
   const k = Math.min(1, dt * 2.5);
-  camera.position.x = lerp(camera.position.x, tx, k);
+  camera.position.x = lerp(camera.position.x, camX, k);
   camera.position.y = lerp(camera.position.y, camBase.y, k);
   camera.position.z = lerp(camera.position.z, camBase.z, k);
   camLook.set(camera.position.x * 0.4, 0.3, camBase.lookZ);
@@ -1349,6 +1436,51 @@ function showMessage(title, sub, tone) {
   msgTimer = setTimeout(() => m.classList.remove('show'), 1600);
 }
 
+// Messages are described by team so each player sees them from their own side.
+function renderAnnounce(s) {
+  const me = myTeam();
+  const opp = net.role ? 'Rival' : 'CPU';
+  const who = s.hitter === me ? 'Your' : net.role ? 'Their' : 'CPU';
+  const reason = String(s.reason || '').replace('{hitter}', who);
+  if (s.k === 'point') {
+    const mine = s.team === me;
+    const title = s.lvl === 'Match' ? (mine ? 'Match won!' : 'Match lost') : mine ? `${s.lvl}!` : `${s.lvl} ${opp}`;
+    showMessage(title, reason, mine ? 'good' : 'bad');
+    if (s.ooh && !mine) sfx.ooh();
+    if (mine) sfx.crowd(s.big ? 1.3 : 0.8, !!s.big);
+    else sfx.crowd(s.big ? 0.6 : 0.35, false);
+    if (mine) haptic(30);
+  } else if (s.k === 'chase') {
+    if (s.team === me) showMessage('Out of the court!', 'Run out through the door', 'neutral');
+  } else {
+    showMessage(String(s.title || ''), reason, s.tone === 'good' || s.tone === 'bad' ? s.tone : 'neutral');
+  }
+}
+
+function announce(s) {
+  renderAnnounce(s);
+  hostSend({ t: 'msg', s });
+}
+
+function renderHint(h) {
+  const t = h && h.team === myTeam()
+    ? `${h.second ? 'Second serve' : 'Your serve'} — ${isTouch ? 'tap DRIVE' : 'press SPACE'} (aim with ${isTouch ? 'stick' : 'arrows'})`
+    : '';
+  setHint(t);
+}
+
+function serveHint(h) {
+  renderHint(h);
+  hostSend({ t: 'hint', h });
+}
+
+const SFX_FORWARD = ['bounce', 'glass', 'mesh', 'net', 'hit', 'whoosh'];
+// Positional sounds; the last argument is always the stereo pan.
+function play(m, ...a) {
+  sfx[m](...a);
+  hostSend({ t: 'sfx', m, a });
+}
+
 function formatMoney(n) {
   return `$${n.toLocaleString('en-US')}`;
 }
@@ -1360,15 +1492,21 @@ function updateMoney() {
 function updateHud() {
   if (!score) return;
   const srv = phase === 'preServe' || phase === 'toss' || phase === 'play' ? serve?.team : null;
+  renderHud(score, srv);
+  hostSend({ t: 'hud', score, srv });
+}
+
+function renderHud(s, srv) {
+  const me = myTeam();
   for (const t of [0, 1]) {
-    const row = $(t === 0 ? 'sb-you' : 'sb-cpu');
+    const row = $(t === me ? 'sb-you' : 'sb-cpu');
     row.querySelector('.sb-serve').classList.toggle('on', srv === t);
-    row.querySelector('.sb-sets').innerHTML = score.history.map((h) => `<span>${h[t]}</span>`).join('');
-    row.querySelector('.sb-games').textContent = score.games[t];
-    row.querySelector('.sb-pts').textContent = pointLabel(t);
+    row.querySelector('.sb-sets').innerHTML = s.history.map((h) => `<span>${Number(h[t]) || 0}</span>`).join('');
+    row.querySelector('.sb-games').textContent = s.games[t];
+    row.querySelector('.sb-pts').textContent = pointLabel(s, t);
   }
-  $('sb-cpu').querySelector('.sb-name').textContent = `CPU · ${D.label}`;
-  $('sb-tag').textContent = score.tiebreak ? 'TIE-BREAK' : F.golden && score.points[0] >= 3 && score.points[1] >= 3 ? 'GOLDEN POINT' : '';
+  $('sb-cpu').querySelector('.sb-name').textContent = net.role ? 'RIVAL' : `CPU · ${D.label}`;
+  $('sb-tag').textContent = s.tiebreak ? 'TIE-BREAK' : F.golden && s.points[0] >= 3 && s.points[1] >= 3 ? 'GOLDEN POINT' : '';
 }
 
 function show(id, on) {
@@ -1426,35 +1564,56 @@ function buildShop() {
 }
 
 function startMatch() {
+  if (net.role === 'guest') return;
+  const online = net.role === 'host';
   score = newScore();
   matchWinner = null;
   serveFaults = 0;
   hitCounter = 0;
-  const hs = Store.racketStats(save.upgrades);
+  // Online matches are on level terms: upgrades don't count.
+  const hs = Store.racketStats(online ? { power: 0, control: 0, spin: 0, reach: 0 } : save.upgrades);
   for (const p of teamPlayers(0)) {
     p.stats = hs;
     p.reach = hs.reach;
     p.speedMax = PLAYER_SPEED;
   }
   for (const p of teamPlayers(1)) {
-    p.stats = { power: D.power, err: D.err, spin: 1, reach: D.reach };
-    p.reach = D.reach;
-    p.speedMax = PLAYER_SPEED * D.speed;
+    p.stats = online ? hs : { power: D.power, err: D.err, spin: 1, reach: D.reach };
+    p.reach = online ? hs.reach : D.reach;
+    p.speedMax = online ? PLAYER_SPEED : PLAYER_SPEED * D.speed;
   }
-  applyRacketLook();
+  setRackets(myRacketColor(), online ? net.guestColor : null);
+  if (online) {
+    net.remoteAxis = { x: 0, y: 0 };
+    net.rematch = { me: false, them: false };
+    hostSend({ t: 'start', fmt: fmtKey, rc: [myRacketColor(), net.guestColor] });
+  }
+  enterMatchUI();
+  setupServe();
+  announce({ k: 'plain', title: 'Game on', reason: online ? `Online · ${F.label}` : `${D.label} · ${F.label}`, tone: 'neutral' });
+}
+
+function enterMatchUI() {
   show('menu', false);
+  show('online', false);
+  show('pause', false);
   show('result', false);
   show('hud', true);
   show('touch', isTouch);
   $('kb-help').classList.toggle('hidden', isTouch);
+  netPaused = false;
   mode = 'playing';
-  setupServe();
-  showMessage('Game on', `${D.label} · ${F.label}`, 'neutral');
+  setViewSide(myTeam());
 }
 
 function endMatch() {
   mode = 'over';
   phase = 'idle';
+  if (net.role) {
+    hostSend({ t: 'end', score, w: matchWinner });
+    showOnlineResult();
+    return;
+  }
   const won = matchWinner === 0;
   const gamesWon = score.totalGames[0];
   const winReward = won ? Math.round(D.reward * F.mult) : 0;
@@ -1474,29 +1633,78 @@ function endMatch() {
   updateMoney();
   show('hud', false);
   show('touch', false);
+  show('result-shop-btn', true);
+  $('result-money').classList.remove('hidden');
+  setRematchButton();
   show('result', true);
 }
 
+function showOnlineResult() {
+  const me = myTeam(), them = 1 - me;
+  const won = matchWinner === me;
+  if (won) save.stats.onlineWins = (save.stats.onlineWins || 0) + 1;
+  else save.stats.onlineLosses = (save.stats.onlineLosses || 0) + 1;
+  Store.save(save);
+  $('result-title').textContent = won ? 'Victory!' : 'Defeat';
+  $('result-title').className = won ? 'good' : 'bad';
+  $('result-score').textContent = score ? score.history.map((h) => `${Number(h[me]) || 0}–${Number(h[them]) || 0}`).join('  ') : '';
+  $('result-breakdown').textContent = `Online record: ${save.stats.onlineWins || 0}W – ${save.stats.onlineLosses || 0}L`;
+  show('hud', false);
+  show('touch', false);
+  show('pause', false);
+  show('result-shop-btn', false);
+  $('result-money').classList.add('hidden');
+  setRematchButton();
+  show('result', true);
+}
+
+function setRematchButton() {
+  const b = $('rematch-btn');
+  const r = net.rematch;
+  b.disabled = !!(net.role && r.me);
+  b.textContent = !net.role ? 'Rematch' : r.me ? 'Waiting for rival…' : r.them ? 'Rival wants a rematch!' : 'Rematch';
+}
+
+function rematch() {
+  if (!net.role) return startMatch();
+  net.rematch.me = true;
+  netSend({ t: 'rematch' });
+  if (net.role === 'host' && net.rematch.them) startMatch();
+  else setRematchButton();
+}
+
 function pauseGame() {
-  if (mode !== 'playing') return;
-  mode = 'paused';
+  if (mode !== 'playing' || netPaused) return;
   keys.clear();
+  // Online the match can't stop for one player; the menu just overlays it.
+  if (net.role) netPaused = true;
+  else mode = 'paused';
+  $('pause-note').textContent = net.role ? 'The match keeps running online. Leaving ends it for both players.' : 'Quitting forfeits any reward for this match.';
+  $('quit-btn').textContent = net.role ? 'Leave match' : 'Quit to menu';
   show('pause', true);
 }
 
 function resumeGame() {
-  mode = 'playing';
+  if (mode === 'paused') mode = 'playing';
+  netPaused = false;
   show('pause', false);
 }
 
 function toMenu() {
+  leaveOnline();
   mode = 'menu';
   phase = 'idle';
+  score = null;
+  netPaused = false;
+  setHint('');
+  setViewSide(0);
+  applyRacketLook();
   show('pause', false);
   show('result', false);
   show('hud', false);
   show('touch', false);
   show('shop', false);
+  show('online', false);
   show('menu', true);
   buildMenu();
   idleCourt();
@@ -1508,16 +1716,324 @@ function idleCourt() {
   setPlayerPos(players[2], -2.4, -7.5);
   setPlayerPos(players[3], 2.4, -4);
   Object.assign(ball, makeBall(), { x: 0, y: 1.2, z: 0.5 });
-  bounceMarker.visible = interceptMarker.visible = false;
+  clearMarkers();
+}
+
+// ---------------------------------------------------------------- online
+function onlineStatus(t) {
+  $('online-status').textContent = t;
+}
+
+function onlineView(v) {
+  show('online-choose', v === 'choose');
+  show('online-wait', v === 'wait');
+  $('host-btn').disabled = $('join-btn').disabled = v === 'busy';
+  if (v === 'busy') show('online-choose', true);
+}
+
+function openOnline(status = '') {
+  show('menu', false);
+  show('online', true);
+  onlineView('choose');
+  onlineStatus(status);
+  $('online-fmt').textContent = `${F.label} — ${F.desc}`;
+}
+
+function leaveOnline() {
+  const link = net.link;
+  if (link) {
+    link.onClose = link.onData = link.onConnect = null;
+    if (net.role) link.send({ t: 'bye' });
+    // Let the goodbye flush before tearing the connection down.
+    setTimeout(() => link.close(), 150);
+  }
+  net.link = null;
+  net.role = null;
+  net.code = '';
+  net.snaps = [];
+  net.queue = [];
+  net.renderT = null;
+  net.remoteAxis = { x: 0, y: 0 };
+  net.rematch = { me: false, them: false };
+}
+
+function onLinkLost(why = 'Connection lost — your rival left the match.') {
+  const wasConnected = !!net.role;
+  toMenu();
+  if (wasConnected) openOnline(why);
+}
+
+function wireLink(link) {
+  link.onData = (d) => {
+    if (net.link !== link || !d || typeof d !== 'object') return;
+    net.lastRecv = performance.now();
+    if (d.t === 'bye') return onLinkLost();
+    if (net.role === 'host') onHostData(d);
+    else if (net.role === 'guest') onGuestData(d);
+  };
+  link.onClose = () => { if (net.link === link) onLinkLost(); };
+}
+
+async function hostOnline() {
+  leaveOnline();
+  const link = new Link();
+  net.link = link;
+  wireLink(link);
+  link.onConnect = () => {
+    if (net.link !== link) return;
+    net.role = 'host';
+    net.lastRecv = performance.now();
+    onlineStatus('Friend connected — starting…');
+  };
+  onlineView('busy');
+  onlineStatus('Creating game…');
+  try {
+    const code = await link.host();
+    if (net.link !== link) return;
+    net.code = code;
+    $('online-code').textContent = code;
+    onlineView('wait');
+    onlineStatus('Waiting for your friend to join…');
+  } catch (err) {
+    if (net.link !== link) return;
+    leaveOnline();
+    onlineView('choose');
+    onlineStatus(err.message);
+  }
+}
+
+async function joinOnline(raw) {
+  const code = normalizeCode(raw);
+  $('join-code').value = code;
+  if (code.length !== CODE_LEN) return onlineStatus(`Enter the ${CODE_LEN}-character code from your friend`);
+  leaveOnline();
+  const link = new Link();
+  net.link = link;
+  wireLink(link);
+  onlineView('busy');
+  onlineStatus('Connecting…');
+  try {
+    await link.join(code);
+  } catch (err) {
+    if (net.link !== link) return;
+    leaveOnline();
+    onlineView('choose');
+    onlineStatus(err.message);
+    return;
+  }
+  if (net.link !== link) return;
+  net.role = 'guest';
+  net.lastRecv = performance.now();
+  onlineStatus('Connected — waiting for the host…');
+  netSend({ t: 'hello', rc: myRacketColor() });
+}
+
+function inviteUrl() {
+  return `${location.origin}${location.pathname}?join=${net.code}`;
+}
+
+async function shareInvite() {
+  if (!net.code) return;
+  const url = inviteUrl();
+  if (isTouch && navigator.share) {
+    try {
+      await navigator.share({ title: 'Padel Royale', text: `Play padel with me! Code: ${net.code}`, url });
+      return;
+    } catch { /* fall back to copying */ }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    onlineStatus('Invite link copied — send it to your friend. Waiting…');
+  } catch {
+    onlineStatus(`Send your friend this link: ${url}`);
+  }
+}
+
+const ACTS = ['drive', 'lob', 'smash', 'switch'];
+function onHostData(d) {
+  switch (d.t) {
+    case 'hello':
+      net.guestColor = (Number(d.rc) || 0) & 0xffffff;
+      if (mode !== 'playing') startMatch();
+      break;
+    case 'in': {
+      let x = clamp(Number(d.x) || 0, -1, 1), y = clamp(Number(d.y) || 0, -1, 1);
+      const l = Math.hypot(x, y);
+      if (l > 1) { x /= l; y /= l; }
+      net.remoteAxis = { x, y };
+      net.remoteAuto = d.a === true;
+      break;
+    }
+    case 'act':
+      if (ACTS.includes(d.a)) actionFor(1, d.a);
+      break;
+    case 'rematch':
+      net.rematch.them = true;
+      if (mode === 'over' && net.rematch.me) startMatch();
+      else setRematchButton();
+      break;
+  }
+}
+
+function onGuestData(d) {
+  switch (d.t) {
+    case 'start':
+      guestStart(d);
+      break;
+    case 's':
+      if (mode === 'playing' && Array.isArray(d.b) && Array.isArray(d.p)) net.snaps.push(d);
+      break;
+    case 'rematch':
+      net.rematch.them = true;
+      setRematchButton();
+      break;
+    default:
+      if (mode === 'playing' && typeof d.st === 'number') net.queue.push(d);
+  }
+}
+
+function guestStart(d) {
+  F = FORMATS[d.fmt] || FORMATS.quick;
+  const rc = Array.isArray(d.rc) ? d.rc : [];
+  setRackets((Number(rc[0]) || 0) & 0xffffff, (Number(rc[1]) || 0) & 0xffffff);
+  score = null;
+  matchWinner = null;
+  lastPointWinner = null;
+  for (const p of players) p.ch.cancelSwing();
+  net.snaps = [];
+  net.queue = [];
+  net.renderT = null;
+  net.rematch = { me: false, them: false };
+  setHint('');
+  enterMatchUI();
+}
+
+// Fires host events once the guest's delayed clock catches up, so sound and sight stay in sync.
+function guestEvent(d) {
+  const p = players[d.i];
+  switch (d.t) {
+    case 'sfx':
+      if (SFX_FORWARD.includes(d.m) && Array.isArray(d.a) && d.a.length) {
+        const a = [...d.a];
+        a[a.length - 1] = -(Number(a[a.length - 1]) || 0);
+        sfx[d.m](...a);
+      }
+      break;
+    case 'sw':
+      if (p && STROKE_TIMING[d.anim] && Array.isArray(d.c)) {
+        p.ch.startSwing(d.anim, d.side === -1 ? -1 : 1, new THREE.Vector3(...d.c.map(Number)), simTime, Number(d.ct), { pos: p.pos, jump: Number(d.j) || 0 });
+      }
+      break;
+    case 'cs': p?.ch.cancelSwing(); break;
+    case 'ss': p?.ch.splitStep(); break;
+    case 'gr': p?.ch.grunt(Number(d.v) || 0); break;
+    case 'hap': haptic(clamp(Number(d.ms) || 0, 0, 60)); break;
+    case 'msg': if (d.s && typeof d.s === 'object') renderAnnounce(d.s); break;
+    case 'hint': renderHint(d.h && typeof d.h === 'object' ? d.h : null); break;
+    case 'hud':
+      if (d.score && Array.isArray(d.score.history)) {
+        score = d.score;
+        renderHud(score, d.srv);
+      }
+      break;
+    case 'end':
+      if (d.score && Array.isArray(d.score.history)) score = d.score;
+      matchWinner = d.w === 0 || d.w === 1 ? d.w : null;
+      mode = 'over';
+      phase = 'idle';
+      showOnlineResult();
+      break;
+  }
+}
+
+function guestStep(realDt) {
+  const snaps = net.snaps;
+  if (!snaps.length) return;
+  const newest = snaps[snaps.length - 1].st;
+  const target = newest - NET_INTERP;
+  if (net.renderT === null || Math.abs(net.renderT - target) > 0.3) net.renderT = target;
+  else net.renderT += realDt * GAME_SPEED + (target - net.renderT) * Math.min(1, realDt * 3);
+  const rt = Math.min(net.renderT, newest);
+  while (snaps.length > 2 && snaps[1].st <= rt) snaps.shift();
+  const a = snaps[0], b = snaps[1] || a;
+  const k = b.st > a.st ? clamp((rt - a.st) / (b.st - a.st), 0, 1) : 0;
+  simTime = rt;
+  ball.x = lerp(a.b[0], b.b[0], k);
+  ball.y = lerp(a.b[1], b.b[1], k);
+  ball.z = lerp(a.b[2], b.b[2], k);
+  players.forEach((p, i) => {
+    const o = i * 4;
+    p.pos.x = lerp(a.p[o], b.p[o], k);
+    p.pos.z = lerp(a.p[o + 1], b.p[o + 1], k);
+    p.vel.x = lerp(a.p[o + 2], b.p[o + 2], k);
+    p.vel.z = lerp(a.p[o + 3], b.p[o + 3], k);
+  });
+  const s = k < 0.5 ? a : b;
+  phase = s.ph;
+  const sv = players[s.sv];
+  serve = sv ? { team: sv.team, server: sv } : null;
+  rally = s.lh === 0 || s.lh === 1 ? { lastHit: s.lh } : null;
+  lastPointWinner = s.pw === 0 || s.pw === 1 ? s.pw : null;
+  ctrl[1] = s.c === 1 ? 1 : 0;
+  const guides = save.settings.guides;
+  bounceMarker.visible = guides && Array.isArray(s.mb);
+  if (bounceMarker.visible) bounceMarker.position.set(s.mb[0], 0.008, s.mb[1]);
+  interceptMarker.visible = guides && Array.isArray(s.mi);
+  if (interceptMarker.visible) interceptMarker.position.set(s.mi[0], 0.007, s.mi[1]);
+
+  while (net.queue.length && net.queue[0].st <= rt && mode === 'playing') guestEvent(net.queue.shift());
+}
+
+const r3 = (v) => Math.round(v * 1000) / 1000;
+function sendSnapshot(now) {
+  if (now - net.lastSnap < 14) return;
+  net.lastSnap = now;
+  const p = [];
+  for (const pl of players) p.push(r3(pl.pos.x), r3(pl.pos.z), r3(pl.vel.x), r3(pl.vel.z));
+  const m = net.marks;
+  netSend({
+    t: 's', st: simTime, b: [r3(ball.x), r3(ball.y), r3(ball.z)], p, ph: phase,
+    sv: serve ? players.indexOf(serve.server) : -1, lh: rally ? rally.lastHit : -1,
+    pw: lastPointWinner ?? -1, c: ctrl[1],
+    mb: m.b ? m.b.map(r3) : 0, mi: m.i ? m.i.map(r3) : 0,
+  });
+}
+
+function sendGuestInput(now) {
+  const a = netPaused || mode !== 'playing' ? { x: 0, y: 0 } : inputAxis();
+  const x = Math.round(a.x * 100) / 100, y = Math.round(a.y * 100) / 100;
+  const li = net.lastIn;
+  if (x === li.x && y === li.y && now - li.t < 250) return;
+  net.lastIn = { x, y, t: now };
+  netSend({ t: 'in', x, y, a: !!save.settings.autoSwing });
+}
+
+function netTick(now, realDt) {
+  if (!net.role) return;
+  if (net.role === 'guest') {
+    if (mode === 'playing') guestStep(realDt);
+    sendGuestInput(now);
+  } else if (mode === 'playing') {
+    sendSnapshot(now);
+  }
+  if (now - net.lastSent > 1000) netSend({ t: 'p' });
+  if (now - net.lastRecv > NET_TIMEOUT) onLinkLost('Connection timed out — your rival dropped out.');
 }
 
 $('play-btn').onclick = startMatch;
+$('online-btn').onclick = () => openOnline();
+$('host-btn').onclick = hostOnline;
+$('join-btn').onclick = () => joinOnline($('join-code').value);
+$('join-code').addEventListener('input', (e) => { e.target.value = normalizeCode(e.target.value); });
+$('join-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinOnline(e.target.value); });
+$('share-btn').onclick = shareInvite;
+$('online-back').onclick = () => { leaveOnline(); show('online', false); show('menu', true); buildMenu(); };
 $('shop-btn').onclick = () => { buildShop(); show('menu', false); show('shop', true); };
 $('shop-back').onclick = () => { show('shop', false); show('menu', true); buildMenu(); };
 $('pause-btn').onclick = pauseGame;
 $('resume-btn').onclick = resumeGame;
 $('quit-btn').onclick = toMenu;
-$('rematch-btn').onclick = startMatch;
+$('rematch-btn').onclick = rematch;
 $('result-shop-btn').onclick = () => { show('result', false); buildShop(); show('shop', true); };
 $('result-menu-btn').onclick = toMenu;
 $('opt-guides').onchange = (e) => { save.settings.guides = e.target.checked; Store.save(save); };
@@ -1531,7 +2047,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const realDt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  if (mode === 'playing') {
+  if (mode === 'playing' && net.role !== 'guest') {
     acc += realDt * GAME_SPEED;
     while (acc >= DT) {
       simStep(DT);
@@ -1539,6 +2055,7 @@ function frame(now) {
       if (mode !== 'playing') { acc = 0; break; }
     }
   }
+  netTick(now, realDt);
   updateVisuals(realDt * (mode === 'playing' ? GAME_SPEED : 1));
   renderer.render(scene, camera);
 }
@@ -1546,6 +2063,12 @@ function frame(now) {
 idleCourt();
 buildMenu();
 applyRacketLook();
+const joinParam = new URLSearchParams(location.search).get('join');
+if (joinParam) {
+  history.replaceState(null, '', location.pathname);
+  openOnline();
+  joinOnline(joinParam);
+}
 if (AUTOPILOT) {
   window.__padel = {
     ball, players, planTeam, predictFor, bestIntercept,

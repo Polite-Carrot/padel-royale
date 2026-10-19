@@ -56,6 +56,7 @@
       <div class="menu-actions">
         <button id="play-btn" class="btn primary big">Play</button>
         <button id="shop-btn" class="btn">Racket Shop</button>
+        <button id="online-btn" class="btn online-btn">Play a Friend Online</button>
       </div>
       <div class="toggles">
         <label><input type="checkbox" id="opt-guides" /> Show landing guides</label>
@@ -79,12 +80,35 @@
     </div>
   </div>
 
+  <div id="online" class="overlay hidden">
+    <div class="panel narrow">
+      <h2>Play a Friend</h2>
+      <p class="note">Head to head online — you each control a pair. Level rackets, no upgrades.</p>
+      <div id="online-choose">
+        <button id="host-btn" class="btn primary big">Create game</button>
+        <div class="label">Match length: <b id="online-fmt"></b></div>
+        <div class="label">Got a code?</div>
+        <div class="join-row">
+          <input id="join-code" maxlength="5" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text" />
+          <button id="join-btn" class="btn primary">Join</button>
+        </div>
+      </div>
+      <div id="online-wait" class="hidden">
+        <div class="label">Your game code</div>
+        <div id="online-code" class="code"></div>
+        <button id="share-btn" class="btn primary">Copy invite link</button>
+      </div>
+      <p id="online-status" class="online-status"></p>
+      <button id="online-back" class="btn">Back</button>
+    </div>
+  </div>
+
   <div id="pause" class="overlay hidden">
     <div class="panel narrow">
       <h2>Paused</h2>
       <button id="resume-btn" class="btn primary big">Resume</button>
       <button id="quit-btn" class="btn">Quit to menu</button>
-      <p class="note">Quitting forfeits any reward for this match.</p>
+      <p id="pause-note" class="note">Quitting forfeits any reward for this match.</p>
     </div>
   </div>
 
@@ -93,7 +117,7 @@
       <h2 id="result-title"></h2>
       <div id="result-score"></div>
       <div id="result-breakdown"></div>
-      <div class="money result-money"><i class="coin"></i><span class="money-value">$0</span></div>
+      <div id="result-money" class="money result-money"><i class="coin"></i><span class="money-value">$0</span></div>
       <button id="rematch-btn" class="btn primary big">Rematch</button>
       <button id="result-shop-btn" class="btn">Racket Shop</button>
       <button id="result-menu-btn" class="btn">Menu</button>

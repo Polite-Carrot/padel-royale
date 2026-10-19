@@ -229,6 +229,28 @@ h2.bad { color: #b2a9ff; }
 .seg button.sel { border-color: #e8ff3a; background: rgba(232, 255, 58, 0.1); }
 
 .menu-actions { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin-top: 6px; }
+.online-btn { grid-column: 1 / -1; background: rgba(46, 196, 182, 0.25); }
+
+#online-choose, #online-wait { display: flex; flex-direction: column; gap: 10px; }
+#online-fmt { color: #e8ff3a; }
+.join-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+#join-code {
+  min-width: 0;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #eef3fa;
+  font: 800 22px/1 ui-monospace, Menlo, monospace;
+  letter-spacing: 0.3em;
+  text-align: center;
+  text-transform: uppercase;
+  padding: 10px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#join-code:focus { outline: none; border-color: #e8ff3a; }
+.code { font: 900 44px/1.1 ui-monospace, Menlo, monospace; letter-spacing: 0.25em; color: #e8ff3a; -webkit-user-select: all; user-select: all; }
+.online-status { margin: 0; min-height: 1.2em; font-size: 14px; opacity: 0.85; word-break: break-all; }
 
 .btn {
   border: 0;
