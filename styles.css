@@ -12,6 +12,8 @@ html, body {
   -webkit-touch-callout: none;
   touch-action: none;
   overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 #scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
@@ -120,61 +122,76 @@ html, body {
 }
 
 /* ---------- Touch controls ---------- */
-#touch { position: fixed; inset: 0; pointer-events: none; }
+#touch { position: fixed; inset: 0; pointer-events: none; --b: clamp(54px, 15vh, 80px); }
 #stick-zone {
   position: absolute;
   left: 0; bottom: 0;
-  width: 50%; height: 70%;
+  width: 45%; height: 75%;
   pointer-events: auto;
   touch-action: none;
 }
 #stick-base {
   position: absolute;
-  left: calc(env(safe-area-inset-left) + 40px);
-  bottom: calc(env(safe-area-inset-bottom) + 30px);
-  width: 120px; height: 120px;
+  left: calc(env(safe-area-inset-left) + 28px);
+  bottom: calc(env(safe-area-inset-bottom) + 22px);
+  width: calc(var(--b) * 1.75); height: calc(var(--b) * 1.75);
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  opacity: 0.6;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.14));
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  opacity: 0.55;
   pointer-events: none;
 }
-#stick-base.active { opacity: 1; bottom: auto; margin: -60px 0 0 -60px; }
+#stick-base.active { opacity: 0.95; bottom: auto; margin: calc(var(--b) * -0.875) 0 0 calc(var(--b) * -0.875); }
 #stick-knob {
   position: absolute;
   left: 50%; top: 50%;
-  width: 54px; height: 54px;
+  width: calc(var(--b) * 0.8); height: calc(var(--b) * 0.8);
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 #btns {
   position: absolute;
-  right: calc(env(safe-area-inset-right) + 14px);
-  bottom: calc(env(safe-area-inset-bottom) + 14px);
-  width: 230px; height: 200px;
+  right: calc(env(safe-area-inset-right) + 16px);
+  bottom: calc(env(safe-area-inset-bottom) + 16px);
+  width: calc(var(--b) * 3.3); height: calc(var(--b) * 2.9);
   pointer-events: none;
 }
 .tbtn {
   position: absolute;
+  width: var(--b); height: var(--b);
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.35);
+  border: 3px solid rgba(255, 255, 255, 0.85);
   color: #fff;
   font-weight: 900;
-  font-size: 13px;
+  font-size: 12px;
   letter-spacing: 0.04em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+  opacity: 0.85;
   pointer-events: auto;
   touch-action: none;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   transition: transform 0.06s;
 }
-.tbtn small { font-size: 9px; font-weight: 600; opacity: 0.8; }
-.tbtn.down { transform: scale(0.9); filter: brightness(1.3); }
-.tbtn.drive { right: 0; bottom: 0; width: 96px; height: 96px; background: rgba(255, 122, 26, 0.75); font-size: 16px; }
-.tbtn.lob { right: 104px; bottom: 6px; width: 72px; height: 72px; background: rgba(46, 196, 182, 0.7); }
-.tbtn.smash { right: 14px; bottom: 104px; width: 78px; height: 78px; background: rgba(255, 77, 109, 0.7); }
-.tbtn.switch { right: 120px; bottom: 100px; width: 58px; height: 58px; background: rgba(255, 255, 255, 0.18); font-size: 10px; }
+.tbtn small { font-size: 8px; font-weight: 700; opacity: 0.9; }
+.tbtn.down { transform: scale(0.88); opacity: 1; filter: brightness(1.2); }
+.tbtn.drive { right: 0; bottom: 0; width: calc(var(--b) * 1.35); height: calc(var(--b) * 1.35); background: #ff7a1a; font-size: 15px; }
+.tbtn.lob { right: calc(var(--b) * 1.55); bottom: 0; background: #17b3a6; }
+.tbtn.smash { right: 0; bottom: calc(var(--b) * 1.55); background: #ff3d63; }
+.tbtn.switch { right: calc(var(--b) * 1.45); bottom: calc(var(--b) * 1.45); width: calc(var(--b) * 0.8); height: calc(var(--b) * 0.8); background: rgba(20, 30, 50, 0.7); font-size: 10px; }
+
+/* On touch the hint sits at the top so the thumbs never cover it. */
+@media (pointer: coarse) {
+  #hint { top: calc(env(safe-area-inset-top) + 12px); bottom: auto; font-size: 13px; max-width: 44vw; white-space: normal; text-align: center; }
+}
+@media (pointer: coarse) and (orientation: portrait) {
+  #touch { --b: clamp(48px, 14vw, 64px); }
+  #hint { top: calc(env(safe-area-inset-top) + 84px); max-width: 90vw; }
+}
 
 /* ---------- Overlays ---------- */
 .overlay {
@@ -249,7 +266,7 @@ h2.bad { color: #b2a9ff; }
   user-select: text;
 }
 #join-code:focus { outline: none; border-color: #e8ff3a; }
-.code { font: 900 44px/1.1 ui-monospace, Menlo, monospace; letter-spacing: 0.25em; color: #e8ff3a; -webkit-user-select: all; user-select: all; }
+.code { font: 900 44px/1.1 ui-monospace, Menlo, monospace; letter-spacing: 0.25em; color: #e8ff3a; -webkit-user-select: none; user-select: none; }
 .online-status { margin: 0; min-height: 1.2em; font-size: 14px; opacity: 0.85; word-break: break-all; }
 
 .btn {
@@ -306,23 +323,8 @@ h2.bad { color: #b2a9ff; }
 .result-money { align-self: center; }
 .note { font-size: 12px; opacity: 0.6; margin: 0; }
 
-#rotate-hint {
-  display: none;
-  position: fixed;
-  top: calc(env(safe-area-inset-top) + 64px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(8, 16, 30, 0.85);
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  z-index: 5;
-  pointer-events: none;
-}
 @media (orientation: portrait) and (pointer: coarse) {
-  #rotate-hint { display: block; }
   #scoreboard { font-size: 12px; min-width: 160px; }
-  .hud-money { top: calc(env(safe-area-inset-top) + 10px); }
 }
 
 @media (max-height: 460px) {

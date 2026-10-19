@@ -135,6 +135,31 @@ function evalKeys(keys, t, out) {
   return { tw: lerp(a.tw, b.tw, e), cr: lerp(a.cr, b.cr, e), lean: lerp(a.lean, b.lean, e), up: lerp(a.up, b.up, e), lhA: a.lh, lhB: b.lh, e };
 }
 
+// ---------------------------------------------------------------- cartoon shading
+let toonRamp = null;
+function toon(color, extra = {}) {
+  if (!toonRamp) {
+    toonRamp = new THREE.DataTexture(new Uint8Array([110, 190, 255]), 3, 1, THREE.RedFormat);
+    toonRamp.minFilter = toonRamp.magFilter = THREE.NearestFilter;
+    toonRamp.needsUpdate = true;
+  }
+  return new THREE.MeshToonMaterial({ color, gradientMap: toonRamp, ...extra });
+}
+
+// Inverted-hull ink outline: the back faces pushed out along the normals, drawn flat dark.
+const OUTLINE = new THREE.ShaderMaterial({
+  uniforms: { thickness: { value: 0.012 }, color: { value: new THREE.Color(0x1b1424) } },
+  vertexShader: 'uniform float thickness; void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position + normal * thickness, 1.0); }',
+  fragmentShader: 'uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }',
+  side: THREE.BackSide,
+});
+function outline(mesh) {
+  const o = new THREE.Mesh(mesh.geometry, OUTLINE);
+  o.castShadow = false;
+  mesh.add(o);
+  return mesh;
+}
+
 // ---------------------------------------------------------------- racket model
 let holeTex = null;
 function racketFaceTexture() {
@@ -160,13 +185,13 @@ function racketFaceTexture() {
 
 function createRacket(color) {
   const group = new THREE.Group();
-  const dark = new THREE.MeshStandardMaterial({ color: 0x18181c, roughness: 0.55, metalness: 0.3 });
-  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.019, 0.15, 10), new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.9 }));
+  const dark = toon(0x18181c);
+  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.019, 0.15, 10), toon(0xf2f2f2));
   grip.position.y = 0.075;
   const throat = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.02, 0.09, 8), dark);
   throat.position.y = 0.19;
-  const faceMat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.15, map: racketFaceTexture() });
-  const face = new THREE.Mesh(new THREE.CylinderGeometry(0.128, 0.128, 0.034, 32), faceMat);
+  const faceMat = toon(color, { map: racketFaceTexture() });
+  const face = outline(new THREE.Mesh(new THREE.CylinderGeometry(0.128, 0.128, 0.034, 32), faceMat));
   face.rotation.x = Math.PI / 2;
   face.scale.set(0.92, 1, 1.07);
   face.position.y = RACKET_HEAD;
@@ -226,15 +251,18 @@ const _C = new THREE.Vector3(), _look = new THREE.Vector3(), _SL = new THREE.Vec
 export class Character {
   constructor(look) {
     this.look = look;
-    const M = (c, r = 0.75) => new THREE.MeshStandardMaterial({ color: c, roughness: r });
-    const skin = M(look.skin, 0.6), shirt = M(look.shirt, 0.85), shorts = M(look.shorts, 0.85), hair = M(look.hair, 0.95);
-    const shoe = M(look.shoe, 0.5), white = M(0xf5f5f5, 0.7), band = M(look.band, 0.7);
-    const eyeWhite = M(0xffffff, 0.25), iris = M(look.eyes, 0.2), mouthMat = M(0x3a1414, 0.6), lipMat = M(0x8a3f36, 0.6);
+    const M = (c) => toon(c);
+    const skin = M(look.skin), shirt = M(look.shirt), shorts = M(look.shorts), hair = M(look.hair);
+    const shoe = M(look.shoe), white = M(0xf5f5f5), band = M(look.band);
+    const eyeWhite = new THREE.MeshBasicMaterial({ color: 0xffffff }), iris = new THREE.MeshBasicMaterial({ color: 0x14101a });
+    const mouthMat = new THREE.MeshBasicMaterial({ color: 0x5a1a22 }), lipMat = new THREE.MeshBasicMaterial({ color: 0x3a1418 });
     const cap = (r, len, m, seg = 12) => new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 4, seg), m);
     const sph = (r, m, ws = 16, hs = 12) => new THREE.Mesh(new THREE.SphereGeometry(r, ws, hs), m);
+    // Body parts get an ink outline; small face details (no shadow) stay clean.
     const add = (parent, mesh, x, y, z, shadow = true) => {
       mesh.position.set(x, y, z);
       mesh.castShadow = shadow;
+      if (shadow) outline(mesh);
       parent.add(mesh);
       return mesh;
     };
@@ -304,6 +332,8 @@ export class Character {
     const head = this.head = new THREE.Group();
     head.position.y = 0.08;
     head.rotation.order = 'YXZ';
+    // Big cartoon head.
+    head.scale.setScalar(1.32);
     neck.add(head);
     add(head, sph(0.11, skin, 24, 18), 0, 0.1, 0).scale.set(0.88, 1.1, 0.97);
     for (const sx of [1, -1]) add(head, sph(0.026, skin, 8, 6), sx * 0.096, 0.1, 0.005).scale.set(0.45, 1, 0.8);
@@ -312,12 +342,13 @@ export class Character {
     this.eyes = [];
     for (const sx of [1, -1]) {
       const eye = new THREE.Group();
-      eye.position.set(sx * 0.037, 0.115, -0.092);
+      eye.position.set(sx * 0.038, 0.118, -0.09);
+      eye.scale.setScalar(1.45);
       head.add(eye);
       add(eye, sph(0.019, eyeWhite, 12, 10), 0, 0, 0, false).scale.set(1, 1, 0.6);
       const pupil = add(eye, sph(0.0105, iris, 10, 8), 0, 0, -0.0095, false);
       pupil.scale.set(1, 1, 0.5);
-      const brow = add(head, new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.009, 0.012), hair), sx * 0.038, 0.147, -0.097, false);
+      const brow = add(head, new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.009, 0.012), hair), sx * 0.038, 0.16, -0.097, false);
       this.eyes.push({ eye, pupil, brow, side: sx });
     }
     const mouth = new THREE.Group();
@@ -578,11 +609,11 @@ export class Character {
 
     const resYaw = yaw - cy, resPitch = pitch - cp;
     for (const eye of this.eyes) {
-      eye.eye.scale.y = lid;
+      eye.eye.scale.y = lid * 1.45;
       eye.pupil.position.x = clamp(-resYaw * 0.012, -0.006, 0.006);
       eye.pupil.position.y = clamp(resPitch * 0.012, -0.005, 0.005);
       eye.brow.rotation.z = eye.side * e.tilt * 0.4;
-      eye.brow.position.y = 0.147 + e.up * 0.008;
+      eye.brow.position.y = 0.16 + e.up * 0.008;
     }
     const sm = e.smile;
     this.smileArc.visible = Math.abs(sm) > 0.12;

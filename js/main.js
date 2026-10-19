@@ -77,8 +77,21 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouch ? 1.75 : 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0a1626);
-scene.fog = new THREE.Fog(0x0a1626, 45, 110);
+scene.background = (() => {
+  const c = document.createElement('canvas');
+  c.width = 2; c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, '#2f8cff');
+  grad.addColorStop(0.6, '#8cc8ff');
+  grad.addColorStop(1, '#dff1ff');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 2, 256);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+})();
+scene.fog = new THREE.Fog(0xcfe8ff, 60, 140);
 const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 200);
 const camLook = new THREE.Vector3();
 let camBase = { y: 8.2, z: 18.5, lookZ: -1.5 };
@@ -88,8 +101,11 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   if (camera.aspect < 1) {
-    camera.fov = 68;
-    camBase = { y: 13, z: 19.5, lookZ: -1 };
+    // Portrait framing is computed per frame in fitPortrait().
+    camera.fov = 50;
+  } else if (isTouch) {
+    camera.fov = 44;
+    camBase = { y: 7.6, z: 14.4, lookZ: -1.2 };
   } else {
     camera.fov = camera.aspect < 1.6 ? 54 : 50;
     camBase = { y: 7.4, z: 15.2, lookZ: -2.2 };
@@ -99,8 +115,8 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x1b2a3d, 1.1));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x6f9a62, 1.7));
+const sun = new THREE.DirectionalLight(0xfff2dc, 2.6);
 sun.position.set(-6, 20, 10);
 sun.castShadow = true;
 sun.shadow.mapSize.set(isTouch ? 1024 : 2048, isTouch ? 1024 : 2048);
@@ -122,30 +138,32 @@ function canvasTex(w, h, draw, rx = 1, ry = 1) {
 }
 
 const turfTex = canvasTex(256, 256, (g, w, h) => {
-  g.fillStyle = '#2462c4';
+  g.fillStyle = '#1f7ae8';
   g.fillRect(0, 0, w, h);
   for (let i = 0; i < 5000; i++) {
     const v = Math.random();
-    g.fillStyle = v < 0.5 ? 'rgba(20,60,140,0.5)' : 'rgba(80,140,230,0.35)';
+    g.fillStyle = v < 0.5 ? 'rgba(18,90,200,0.55)' : 'rgba(110,175,255,0.35)';
     g.fillRect(Math.random() * w, Math.random() * h, 1.5, 1.5);
   }
 }, 4, 8);
 
 const fenceTex = canvasTex(64, 64, (g, w, h) => {
   g.clearRect(0, 0, w, h);
-  g.strokeStyle = '#1b1f24';
+  g.strokeStyle = '#15181d';
   g.lineWidth = 4;
   g.beginPath();
   g.moveTo(0, h / 2); g.lineTo(w / 2, 0); g.lineTo(w, h / 2); g.lineTo(w / 2, h); g.closePath();
   g.stroke();
 });
 
+// Fine dark netting: mipmapping turns it into a see-through dark band at a distance, like a real net.
 const netTex = canvasTex(32, 32, (g, w, h) => {
-  g.clearRect(0, 0, w, h);
-  g.strokeStyle = '#e8eef5';
-  g.lineWidth = 2;
+  g.fillStyle = 'rgba(10,12,16,0.18)';
+  g.fillRect(0, 0, w, h);
+  g.strokeStyle = 'rgba(10,12,16,0.95)';
+  g.lineWidth = 4;
   g.strokeRect(0, 0, w, h);
-}, 120, 10);
+}, 222, 19);
 
 function plane(w, h, mat, x, y, z, rotY = 0) {
   const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
@@ -157,13 +175,13 @@ function plane(w, h, mat, x, y, z, rotY = 0) {
 
 function buildCourt() {
   const W = COURT.halfW, L = COURT.halfL;
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(90, 90), new THREE.MeshStandardMaterial({ color: 0x18222f, roughness: 1 }));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(160, 160), new THREE.MeshStandardMaterial({ color: 0x66b85a, roughness: 1 }));
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.02;
   ground.receiveShadow = true;
   scene.add(ground);
 
-  const apron = new THREE.Mesh(new THREE.PlaneGeometry(19, 26), new THREE.MeshStandardMaterial({ color: 0x1f6b40, roughness: 1 }));
+  const apron = new THREE.Mesh(new THREE.PlaneGeometry(19, 26), new THREE.MeshStandardMaterial({ color: 0x2fa866, roughness: 1 }));
   apron.rotation.x = -Math.PI / 2;
   apron.position.y = -0.01;
   apron.receiveShadow = true;
@@ -185,10 +203,38 @@ function buildCourt() {
   line(0, -COURT.serviceZ, 2 * W, 0.05);
   line(0, 0, 0.05, 2 * (COURT.serviceZ + 0.2));
 
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0xbfe0ff, transparent: true, opacity: 0.13, roughness: 0.05, metalness: 0.1,
+  // Tempered glass: a light tint plus bright edges so each 2 m panel reads clearly.
+  const glassMat = (faint) => new THREE.MeshStandardMaterial({
+    color: 0xd9f1ff, transparent: true, opacity: faint ? 0.06 : 0.2, roughness: 0.05, metalness: 0.1,
     side: THREE.DoubleSide, depthWrite: false,
   });
+  const edgeMat = (faint) => new THREE.MeshBasicMaterial({ color: 0xeaf8ff, transparent: true, opacity: faint ? 0.15 : 0.75, depthWrite: false });
+  const glassSolid = glassMat(false), glassFaint = glassMat(true);
+  const edgeSolid = edgeMat(false), edgeFaint = edgeMat(true);
+  const swap = (m, z, solid, faint) => {
+    viewSwap.push({ mesh: m, z, solid, faint, shadow: false });
+    scene.add(m);
+  };
+  const edgeBar = (x, y, z, lx, ly, lz) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(lx, ly, lz), edgeSolid);
+    m.position.set(x, y, z);
+    swap(m, z, edgeSolid, edgeFaint);
+  };
+  // One glass panel, centred at (x, z), facing along z (back wall) or x (side wall).
+  const glassPanel = (x, z, w, h, side) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.03, h), glassSolid);
+    m.position.set(x, h / 2, z);
+    if (side) m.rotation.y = Math.PI / 2;
+    swap(m, z, glassSolid, glassFaint);
+    const t = 0.035;
+    if (side) {
+      edgeBar(x, h - t / 2, z, t, t, w - 0.03);
+      for (const e of [-1, 1]) edgeBar(x, h / 2, z + e * (w / 2 - 0.03), t, h, t);
+    } else {
+      edgeBar(x, h - t / 2, z, w - 0.03, t, t);
+      for (const e of [-1, 1]) edgeBar(x + e * (w / 2 - 0.03), h / 2, z, t, h, t);
+    }
+  };
   // Camera-side panels are faint so they don't block the view of your own half.
   const fenceMat = (w, h, faint = false) => {
     const t = fenceTex.clone();
@@ -204,32 +250,33 @@ function buildCourt() {
     const m = plane(w, h, fenceMat(w, h), x, y, z, rotY);
     viewSwap.push({ mesh: m, z, solid: m.material, faint: fenceMat(w, h, true), shadow: false });
   };
+  // Padel cage: back walls are 3 m of glass with 1 m of mesh on top. Each side wall has two 2 m panels
+  // of 3 m glass at each end (only the corner one has mesh above, to 4 m), and 3 m mesh along the middle.
   for (const s of [-1, 1]) {
-    plane(2 * W, 3, glassMat, 0, 1.5, s * L);
+    for (let x = -W + 1; x < W; x += 2) glassPanel(x, s * L, 2, 3, false);
     fencePlane(2 * W, 1, 0, 3.5, s * L);
     for (const sx of [-1, 1]) {
-      plane(2, 3, glassMat, sx * W, 1.5, s * 9, Math.PI / 2);
+      glassPanel(sx * W, s * 9, 2, 3, true);
       fencePlane(2, 1, sx * W, 3.5, s * 9, Math.PI / 2);
-      plane(2, 2, glassMat, sx * W, 1, s * 7, Math.PI / 2);
-      fencePlane(2, 1, sx * W, 2.5, s * 7, Math.PI / 2);
+      glassPanel(sx * W, s * 7, 2, 3, true);
     }
   }
   for (const sx of [-1, 1]) {
-    const z0 = DOOR.z0, z1 = DOOR.z1, dw = z1 - z0;
-    for (const [a, b] of [[-6, -z1], [-z0, z0], [z1, 6]]) plane(b - a, 3, fenceMat(b - a, 3), sx * W, 1.5, (a + b) / 2, Math.PI / 2);
-    for (const s of [-1, 1]) plane(dw, 3 - DOOR.h, fenceMat(dw, 3 - DOOR.h), sx * W, (3 + DOOR.h) / 2, s * (z0 + z1) / 2, Math.PI / 2);
+    const z1 = DOOR.z1;
+    for (const [a, b] of [[-6, -z1], [z1, 6]]) plane(b - a, 3, fenceMat(b - a, 3), sx * W, 1.5, (a + b) / 2, Math.PI / 2);
+    plane(2 * z1, 3 - DOOR.h, fenceMat(2 * z1, 3 - DOOR.h), sx * W, (3 + DOOR.h) / 2, 0, Math.PI / 2);
   }
 
-  const solidFrame = new THREE.MeshStandardMaterial({ color: 0x12161c, roughness: 0.5, metalness: 0.6 });
-  const faintFrame = new THREE.MeshStandardMaterial({ color: 0x12161c, transparent: true, opacity: 0.25, depthWrite: false });
+  const solidFrame = new THREE.MeshStandardMaterial({ color: 0x1b1f26, roughness: 0.5, metalness: 0.5 });
+  const faintFrame = new THREE.MeshStandardMaterial({ color: 0x1b1f26, transparent: true, opacity: 0.25, depthWrite: false });
   const frameMat = solidFrame;
   const frame = (m, z, shadow) => {
     m.castShadow = shadow;
     if (Math.abs(z) > 5) viewSwap.push({ mesh: m, z, solid: solidFrame, faint: faintFrame, shadow });
     scene.add(m);
   };
-  const post = (x, z, h) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.08, h, 0.08), solidFrame);
+  const post = (x, z, h, t = 0.08) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(t, h, t), solidFrame);
     m.position.set(x, h / 2, z);
     frame(m, z, true);
   };
@@ -238,42 +285,53 @@ function buildCourt() {
     m.position.set(x, y, z);
     frame(m, z, false);
   };
-  for (let z = -L; z <= L; z += 2) for (const sx of [-1, 1]) post(sx * W, z, Math.abs(z) >= 8 ? 4 : 3);
-  for (let x = -W; x <= W; x += 2.5) for (const s of [-1, 1]) post(x, s * L, 4);
+  for (let z = -L; z <= L; z += 2) for (const sx of [-1, 1]) if (z !== 0) post(sx * W, z, Math.abs(z) >= 8 ? 4 : 3);
+  for (let x = -W; x <= W; x += 2) for (const s of [-1, 1]) post(x, s * L, 4);
   for (const s of [-1, 1]) {
     rail(0, 4, s * L, 2 * W);
     rail(0, 3, s * L, 2 * W);
     for (const sx of [-1, 1]) {
       rail(sx * W, 4, s * 9, 0, 2);
       rail(sx * W, 3, s * 9, 0, 2);
-      rail(sx * W, 2, s * 7, 0, 2);
-      rail(sx * W, 3, s * 7, 0, 2);
     }
   }
   for (const sx of [-1, 1]) {
     rail(sx * W, 3, 0, 0, 12);
     for (const s of [-1, 1]) {
-      post(sx * W, s * DOOR.z0, DOOR.h);
-      post(sx * W, s * DOOR.z1, DOOR.h);
+      post(sx * W, s * DOOR.z1, 3, 0.1);
       rail(sx * W, DOOR.h, s * (DOOR.z0 + DOOR.z1) / 2, 0, DOOR.z1 - DOOR.z0);
     }
   }
 
-  // Net
+  // Net: dark netting, white tape on top, white band at the bottom, posts at each side.
   const netMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(2 * W, COURT.netH - 0.02),
-    new THREE.MeshBasicMaterial({ map: netTex, transparent: true, alphaTest: 0.3, side: THREE.DoubleSide }),
+    new THREE.MeshBasicMaterial({ map: netTex, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
   );
   netMesh.position.set(0, (COURT.netH + 0.02) / 2, 0);
   scene.add(netMesh);
-  const tape = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.05, 0.02), new THREE.MeshStandardMaterial({ color: 0xffffff }));
-  tape.position.set(0, COURT.netH, 0);
+  const white = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+  const tape = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.07, 0.025), white);
+  tape.position.set(0, COURT.netH - 0.015, 0);
+  tape.castShadow = true;
   scene.add(tape);
+  const band = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.04, 0.015), white);
+  band.position.set(0, 0.04, 0);
+  scene.add(band);
+  // Slim posts flush with the wall line hold the net; low enough to leave the doorway clear.
+  const postMat = new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 0.4, metalness: 0.6 });
   for (const sx of [-1, 1]) {
-    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1, 10), frameMat);
-    p.position.set(sx * (W + 0.05), 0.5, 0);
+    const ph = COURT.netHPost + 0.02;
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.035, ph, 12), postMat);
+    p.position.set(sx * (W + 0.02), ph / 2, 0);
     p.castShadow = true;
     scene.add(p);
+    const capTop = new THREE.Mesh(new THREE.SphereGeometry(0.036, 12, 8), white);
+    capTop.position.set(sx * (W + 0.02), ph, 0);
+    scene.add(capTop);
+    const edge = new THREE.Mesh(new THREE.BoxGeometry(0.04, COURT.netH, 0.02), white);
+    edge.position.set(sx * (W - 0.03), COURT.netH / 2, 0);
+    scene.add(edge);
   }
 
   // Surroundings: light towers and stands
@@ -287,9 +345,9 @@ function buildCourt() {
     lamp.lookAt(0, 0, 0);
     scene.add(lamp);
   }
-  const standMat = new THREE.MeshStandardMaterial({ color: 0x23344d, roughness: 0.9 });
+  const standColors = [0xff7a1a, 0xffc23d, 0x2ec4b6, 0x6b5bff];
   for (const sx of [-1, 1]) for (let i = 0; i < 4; i++) {
-    const s = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5 + i * 0.5, 22), standMat);
+    const s = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5 + i * 0.5, 22), new THREE.MeshStandardMaterial({ color: standColors[i], roughness: 0.8 }));
     s.position.set(sx * (10.5 + i * 1.2), (0.5 + i * 0.5) / 2, 0);
     s.receiveShadow = true;
     scene.add(s);
@@ -501,7 +559,23 @@ document.querySelectorAll('[data-act]').forEach((btn) => {
 });
 
 document.addEventListener('contextmenu', (e) => e.preventDefault());
-document.addEventListener('gesturestart', (e) => e.preventDefault());
+// No zooming of any kind: pinch, double-tap, ctrl+wheel/trackpad pinch or ctrl +/-.
+for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+let lastTouchEnd = 0;
+document.addEventListener('touchend', (e) => {
+  const now = performance.now();
+  if (now - lastTouchEnd < 350 && !e.target.closest('button, input')) e.preventDefault();
+  lastTouchEnd = now;
+}, { passive: false });
+document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
+window.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && ['Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract', 'Digit0', 'Numpad0'].includes(e.code)) e.preventDefault();
+});
+// Copying and selecting are blocked everywhere; pasting (e.g. a join code) still works.
+for (const ev of ['copy', 'cut', 'dragstart']) document.addEventListener(ev, (e) => e.preventDefault());
+document.addEventListener('selectstart', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
 
 // ---------------------------------------------------------------- game state
 let mode = 'menu';
@@ -753,7 +827,10 @@ function tryCommit(p, type) {
   const lead = strokeLead(s.anim);
   if (c.t > lead + DT * 0.5) return false;
   const incoming = Math.hypot(ball.vx, ball.vy, ball.vz);
-  const whiff = type === 'ai' && rollsFor(p)[3] < D.miss * (1 + incoming / 25);
+  // Fresh roll per attempt; a second chance at the same ball (e.g. off the glass) is rarely fluffed.
+  const retry = p.missFor === rally.hitId;
+  const whiff = type === 'ai' && Math.random() < D.miss * (1 + incoming / 25) * (retry ? 0.25 : 1);
+  if (whiff) p.missFor = rally.hitId;
   p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed: clamp((lead - c.t) / lead, 0, 1), whiff, whooshed: false };
   let jump = 0;
   if (s.anim === 'smash' || s.anim === 'pop') jump = clamp(c.y - 2.3, 0, 0.8) + (s.anim === 'pop' ? 0.08 : 0);
@@ -1402,12 +1479,18 @@ function updateVisuals(dt) {
   ctrlArrow.position.set(ctrlP.pos.x, 2.25 + Math.sin(performance.now() / 200) * 0.05, ctrlP.pos.z);
 
   // Camera x is in view space; the guest's world is spun 180°.
-  const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (ball.x * 0.25 + ctrlP.pos.x * 0.15) * rightX(me);
   const k = Math.min(1, dt * 2.5);
-  camera.position.x = lerp(camera.position.x, camX, k);
-  camera.position.y = lerp(camera.position.y, camBase.y, k);
-  camera.position.z = lerp(camera.position.z, camBase.z, k);
-  camLook.set(camera.position.x * 0.4, 0.3, camBase.lookZ);
+  if (camera.aspect < 1) {
+    fitPortrait(me);
+    camera.position.lerp(_fitPos, k);
+    camLook.lerp(_fitLook, k);
+  } else {
+    const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (ball.x * 0.25 + ctrlP.pos.x * 0.15) * rightX(me);
+    camera.position.x = lerp(camera.position.x, camX, k);
+    camera.position.y = lerp(camera.position.y, camBase.y, k);
+    camera.position.z = lerp(camera.position.z, camBase.z, k);
+    camLook.set(camera.position.x * 0.4, 0.3, camBase.lookZ);
+  }
   camera.lookAt(camLook);
   const dc = AUTOPILOT && window.__cam;
   if (dc && dc.follow !== undefined) {
@@ -1418,6 +1501,63 @@ function updateVisuals(dt) {
     camera.position.set(...dc.pos);
     camera.lookAt(...dc.look);
   }
+}
+
+// ---------------------------------------------------------------- portrait camera
+// Portrait screens are narrow, so the camera is fitted every frame: the whole court plus your
+// players (if they run outside) must sit between the HUD at the top and the controls at the bottom.
+const PORTRAIT_PITCH = 0.98;
+const _fitPos = new THREE.Vector3(), _fitLook = new THREE.Vector3();
+const FIT_COURT = [
+  [-5, 0, 10.2], [5, 0, 10.2], [-5, 0, -10], [5, 0, -10], [-5, 4, -10], [5, 4, -10], [-5, 3, 0], [5, 3, 0],
+];
+const fitPts = [];
+function fitPortrait(me) {
+  fitPts.length = 0;
+  for (const p of FIT_COURT) fitPts.push(p);
+  if (mode !== 'menu') {
+    // View coordinates: the guest's world is rotated 180°.
+    const v = me === 0 ? 1 : -1;
+    for (const p of teamPlayers(me)) {
+      const x = p.pos.x * v, z = p.pos.z * v;
+      fitPts.push([x - 0.7, 0, z], [x + 0.7, 0, z], [x, 2.1, z]);
+    }
+  }
+  const h = window.innerHeight;
+  const hudOn = !$('hud').classList.contains('hidden');
+  const topPx = hudOn ? $('scoreboard').offsetTop + $('scoreboard').offsetHeight + 6 : 16;
+  const botPx = hudOn && isTouch ? h * 0.1 : 12;
+  const mTop = (2 * topPx) / h, mBot = (2 * botPx) / h, mSide = 0.03;
+  const th = Math.tan((camera.fov * Math.PI) / 360), tw = th * camera.aspect;
+  const s = Math.sin(PORTRAIT_PITCH), c = Math.cos(PORTRAIT_PITCH);
+  let minX = Infinity, maxX = -Infinity;
+  for (const p of fitPts) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]); }
+  const cx = (minX + maxX) / 2;
+  const fits = (tz, d) => {
+    const cy = d * s, cz = tz + d * c;
+    for (const [x, y, z] of fitPts) {
+      const vx = x - cx, vy = y - cy, vz = z - cz;
+      const depth = -s * vy - c * vz;
+      if (depth < 1) return false;
+      const ny = (c * vy - s * vz) / (depth * th);
+      if (Math.abs(vx / (depth * tw)) > 1 - mSide || ny > 1 - mTop || ny < -1 + mBot) return false;
+    }
+    return true;
+  };
+  let bestD = Infinity, bestZ = 0;
+  for (let tz = -6; tz <= 6; tz += 0.25) {
+    let lo = 3, hi = 90;
+    if (!fits(tz, hi)) continue;
+    for (let i = 0; i < 16; i++) {
+      const mid = (lo + hi) / 2;
+      if (fits(tz, mid)) hi = mid; else lo = mid;
+    }
+    // Among equally close framings prefer the most centred one.
+    if (hi < bestD - 0.05 || (hi < bestD + 0.05 && Math.abs(tz) < Math.abs(bestZ))) { bestD = Math.min(bestD, hi); bestZ = tz; }
+  }
+  if (!isFinite(bestD)) { bestD = 30; bestZ = 0; }
+  _fitLook.set(cx, 0, bestZ);
+  _fitPos.set(cx, bestD * s, bestZ + bestD * c);
 }
 
 // ---------------------------------------------------------------- HUD & menus

@@ -4,8 +4,8 @@
 export const G = 9.81;
 export const BALL_R = 0.0335;
 export const COURT = { halfW: 5, halfL: 10, serviceZ: 6.95, netH: 0.88, netHPost: 0.92 };
-// Two open accesses per side wall, 0.82 m wide x 2 m high, either side of the net post: |z| in [z0, z1].
-export const DOOR = { z0: 0.08, z1: 0.9, h: 2.0 };
+// One open access per side wall at the net, 1.8 m wide x 2 m high: |z| < z1.
+export const DOOR = { z0: 0, z1: 0.9, h: 2.0 };
 
 const RHO = 1.2, CD = 0.55, MASS = 0.057;
 const DRAG_K = (0.5 * RHO * CD * Math.PI * BALL_R * BALL_R) / MASS;
@@ -33,12 +33,12 @@ export function netHeight(x) {
   return COURT.netH + (COURT.netHPost - COURT.netH) * t * t;
 }
 
-// Side walls: 2 m of 3 m glass at each back corner, then 2 m of 2 m glass, the rest is mesh.
+// Side walls: two 2 m panels of 3 m glass at each end (mesh above the corner one up to 4 m), the rest is mesh.
 export function sideWallSurf(z, y) {
   const az = Math.abs(z);
   if (az > 8) return y < 3 ? 'glass' : y < 4 ? 'mesh' : null;
-  if (az > 6) return y < 2 ? 'glass' : y < 3 ? 'mesh' : null;
-  if (az > DOOR.z0 && az < DOOR.z1 && y < DOOR.h) return null;
+  if (az > 6) return y < 3 ? 'glass' : null;
+  if (az >= DOOR.z0 && az < DOOR.z1 && y < DOOR.h) return null;
   return y < 3 ? 'mesh' : null;
 }
 
@@ -49,7 +49,7 @@ export function sideWallTop(z) {
 
 export function throughDoor(z, y) {
   const az = Math.abs(z);
-  return az > DOOR.z0 + 0.06 && az < DOOR.z1 - 0.06 && y + BALL_R < DOOR.h - 0.05;
+  return az < DOOR.z1 - 0.06 && y + BALL_R < DOOR.h - 0.05;
 }
 
 export function backWallSurf(y) {
