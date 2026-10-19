@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0a1626" />
+  <title>Padel 3D</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="rotate-hint">Rotate your device to landscape for the best view</div>
+
+  <div id="hud" class="hidden">
+    <div id="scoreboard">
+      <div class="sb-row" id="sb-you"><span class="sb-serve"></span><span class="sb-name">YOU</span><span class="sb-sets"></span><span class="sb-games">0</span><span class="sb-pts">0</span></div>
+      <div class="sb-row" id="sb-cpu"><span class="sb-serve"></span><span class="sb-name">CPU</span><span class="sb-sets"></span><span class="sb-games">0</span><span class="sb-pts">0</span></div>
+      <div id="sb-tag"></div>
+    </div>
+    <div class="money hud-money"><i class="coin"></i><span class="money-value">$0</span></div>
+    <button id="pause-btn" aria-label="Pause">II</button>
+    <div id="message" class="message"><div class="msg-title"></div><div class="msg-sub"></div></div>
+    <div id="hint"></div>
+    <div id="kb-help">WASD / Arrows move &amp; aim · Space drive · K lob · L smash/drop · Q switch · Esc pause</div>
+  </div>
+
+  <div id="touch" class="hidden">
+    <div id="stick-zone"></div>
+    <div id="stick-base"><div id="stick-knob"></div></div>
+    <div id="btns">
+      <button class="tbtn drive" data-act="drive">DRIVE</button>
+      <button class="tbtn lob" data-act="lob">LOB</button>
+      <button class="tbtn smash" data-act="smash">SMASH<small>drop if low</small></button>
+      <button class="tbtn switch" data-act="switch">SWITCH</button>
+    </div>
+  </div>
+
+  <div id="menu" class="overlay">
+    <div class="panel">
+      <h1>PADEL<span>3D</span></h1>
+      <div class="menu-meta">
+        <div class="money"><i class="coin"></i><span class="money-value">$0</span></div>
+        <div class="meta-item">Racket: <b id="menu-racket"></b></div>
+        <div class="meta-item">Record: <b id="menu-record"></b></div>
+      </div>
+      <div class="label">Opponents</div>
+      <div class="seg" id="diff-seg"></div>
+      <div class="label">Match length</div>
+      <div class="seg" id="fmt-seg"></div>
+      <div class="menu-actions">
+        <button id="play-btn" class="btn primary big">Play</button>
+        <button id="shop-btn" class="btn">Racket Shop</button>
+      </div>
+      <div class="toggles">
+        <label><input type="checkbox" id="opt-guides" /> Show landing guides</label>
+        <label><input type="checkbox" id="opt-auto" /> Auto-swing</label>
+      </div>
+    </div>
+  </div>
+
+  <div id="shop" class="overlay hidden">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Racket Shop</h2>
+        <div class="money"><i class="coin"></i><span class="money-value">$0</span></div>
+      </div>
+      <div class="racket-card">
+        <div id="shop-racket-swatch" class="swatch"></div>
+        <div><b id="shop-racket-name"></b><p id="shop-racket-next"></p></div>
+      </div>
+      <div id="shop-list"></div>
+      <button id="shop-back" class="btn">Back</button>
+    </div>
+  </div>
+
+  <div id="pause" class="overlay hidden">
+    <div class="panel narrow">
+      <h2>Paused</h2>
+      <button id="resume-btn" class="btn primary big">Resume</button>
+      <button id="quit-btn" class="btn">Quit to menu</button>
+      <p class="note">Quitting forfeits any reward for this match.</p>
+    </div>
+  </div>
+
+  <div id="result" class="overlay hidden">
+    <div class="panel narrow">
+      <h2 id="result-title"></h2>
+      <div id="result-score"></div>
+      <div id="result-breakdown"></div>
+      <div class="money result-money"><i class="coin"></i><span class="money-value">$0</span></div>
+      <button id="rematch-btn" class="btn primary big">Rematch</button>
+      <button id="result-shop-btn" class="btn">Racket Shop</button>
+      <button id="result-menu-btn" class="btn">Menu</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

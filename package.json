@@ -1,0 +1,15 @@
+{
+  "name": "padel-3d",
+  "version": "1.0.0",
+  "description": "3D padel game",
+  "private": true,
+  "scripts": {
+    "start": "python3 tools/serve.py 8080",
+    "vendor": "cp node_modules/three/build/three.module.js node_modules/three/build/three.core.js vendor/"
+  },
+  "keywords": [],
+  "type": "module",
+  "dependencies": {
+    "three": "^0.186.1"
+  }
+}
