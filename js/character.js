@@ -4,6 +4,8 @@ import * as THREE from 'three';
 // contact key is the predicted ball position, so racket and ball meet exactly.
 
 const TAU = Math.PI * 2;
+// Visual scale of the whole character; IK lengths and body-space conversions account for it.
+const SCALE = 1.12;
 const L_UP = 0.3, L_FORE = 0.28;
 const RACKET_HEAD = 0.34;
 const THIGH = 0.44, SHIN = 0.44, ANKLE_H = 0.08;
@@ -223,15 +225,16 @@ function solveArm(arm, target, pole, outWrist) {
   _D.subVectors(target, _S);
   let dist = _D.length();
   _D.divideScalar(dist || 1);
-  dist = clamp(dist, 0.06, L_UP + L_FORE - 0.002);
-  const cosA = clamp((L_UP * L_UP + dist * dist - L_FORE * L_FORE) / (2 * L_UP * dist), -1, 1);
+  const up = L_UP * SCALE, fore = L_FORE * SCALE;
+  dist = clamp(dist, 0.06, up + fore - 0.002);
+  const cosA = clamp((up * up + dist * dist - fore * fore) / (2 * up * dist), -1, 1);
   const sinA = Math.sqrt(1 - cosA * cosA);
   _P.subVectors(pole, _S);
   _P.addScaledVector(_D, -_P.dot(_D));
   if (_P.lengthSq() < 1e-8) _P.set(0, -1, 0).addScaledVector(_D, _D.y);
   _P.normalize();
   _U.copy(_D).multiplyScalar(cosA).addScaledVector(_P, sinA);
-  _E.copy(_S).addScaledVector(_U, L_UP);
+  _E.copy(_S).addScaledVector(_U, up);
   outWrist.copy(_S).addScaledVector(_D, dist);
   _F.subVectors(outWrist, _E).normalize();
   boneQuat(_U, _P, _qU);
@@ -268,6 +271,7 @@ export class Character {
     };
 
     const root = this.root = new THREE.Group();
+    root.scale.setScalar(SCALE);
     const pelvis = this.pelvis = new THREE.Group();
     pelvis.position.y = HIP_H;
     root.add(pelvis);
@@ -405,7 +409,7 @@ export class Character {
     this.swing = {
       anim, side, contact: contactWorld.clone(),
       start: contactTime - T.tc * T.dur, dur: T.dur, tc: T.tc,
-      yaw: this.yaw, jump: opts.jump || 0,
+      yaw: this.yaw, jump: opts.jump || 0, spin: opts.spin || 0,
       lunge: new THREE.Vector3((dx / dh) * l, 0, (dz / dh) * l),
     };
   }
@@ -425,14 +429,15 @@ export class Character {
 
   // Racket-local position of the ball held for the serve, in world space.
   static serveHoldWorld(x, z, yaw, out) {
-    const c = Math.cos(yaw), s = Math.sin(yaw);
-    return out.set(x + c * SERVE_HOLD.x + s * SERVE_HOLD.z, SERVE_HOLD.y, z - s * SERVE_HOLD.x + c * SERVE_HOLD.z);
+    const c = Math.cos(yaw), s = Math.sin(yaw), hx = SERVE_HOLD.x * SCALE, hz = SERVE_HOLD.z * SCALE;
+    return out.set(x + c * hx + s * hz, SERVE_HOLD.y * SCALE, z - s * hx + c * hz);
   }
 
+  // World point -> body space (unscaled units, matching the stroke keyframes).
   toLocal(w, out) {
     const p = this.root.position, c = Math.cos(this.yaw), s = Math.sin(this.yaw);
     const dx = w.x - p.x, dz = w.z - p.z;
-    return out.set(c * dx - s * dz, w.y - p.y, s * dx + c * dz);
+    return out.set(c * dx - s * dz, w.y - p.y, s * dx + c * dz).divideScalar(SCALE);
   }
 
   update(dt, st) {
@@ -458,7 +463,9 @@ export class Character {
       oy += Math.sin(Math.PI * (1 - Math.max(0, this.splitT) / 0.28)) * 0.07;
     }
     root.position.set(st.x + ox, oy, st.z + oz);
-    root.rotation.y = this.yaw;
+    // Anime flair: a full body spin that finishes just before contact, so the racket still meets the ball.
+    const spinOff = sw && sw.spin ? sw.spin * TAU * smooth(clamp(tn / Math.max(0.1, sw.tc - 0.06), 0, 1)) : 0;
+    root.rotation.y = this.yaw + spinOff;
 
     const speed = Math.hypot(st.vx, st.vz);
     const fwdX = -Math.sin(this.yaw), fwdZ = -Math.cos(this.yaw);
@@ -499,6 +506,27 @@ export class Character {
     }
     if (this.splitT > 0) cr += 0.15;
 
+    // Inertial blending: when the pose source changes (swing, idle, serve hold, celebration) the old pose
+    // eases into the new one instead of snapping. The offset decays fast enough that contacts stay exact.
+    const key = sw ? 'sw' : st.holdBall ? 'hold' : st.mood || 'idle';
+    const pose = this._pose || (this._pose = new Float32Array(8));
+    pose[0] = tw; pose[1] = cr; pose[2] = lean; pose[3] = open; pose[4] = up; pose[5] = _head.x; pose[6] = _head.y; pose[7] = _head.z;
+    if (this._last && key !== this.poseKey) {
+      this._off = this._off || new Float32Array(8);
+      for (let i = 0; i < 8; i++) this._off[i] = this._last[i] - pose[i];
+      this._offLH = true;
+    }
+    this.poseKey = key;
+    if (this._off) {
+      const decay = Math.exp(-dt / 0.085);
+      let mag = 0;
+      for (let i = 0; i < 8; i++) { pose[i] += this._off[i]; this._off[i] *= decay; mag += Math.abs(this._off[i]); }
+      if (mag < 1e-3) this._off = null;
+      [tw, cr, lean, open, up] = pose;
+      _head.set(pose[5], pose[6], pose[7]);
+    }
+    (this._last || (this._last = new Float32Array(8))).set(pose);
+
     // Legs
     const hipH = HIP_H - cr * 0.32 + Math.abs(Math.sin(this.gait)) * 0.035 * amp;
     this.pelvis.position.y = hipH;
@@ -530,7 +558,7 @@ export class Character {
     _rd.subVectors(_headW, _tmp).normalize();
     _rd.y += up;
     _rd.normalize();
-    _wristT.copy(_headW).addScaledVector(_rd, -RACKET_HEAD);
+    _wristT.copy(_headW).addScaledVector(_rd, -RACKET_HEAD * SCALE);
     const over = smooth(clamp((_head.y - 1.35) / 0.6, 0, 1));
     const back = smooth(clamp((-_head.x - 0.05) / 0.3, 0, 1));
     _pole.set(lerp(lerp(0.75, 0.2, back), 0.75, over), lerp(lerp(0.9, 0.95, back), 1.6, over), lerp(lerp(0.4, -0.35, back), 0.15, over));
@@ -562,6 +590,16 @@ export class Character {
     resolveLH(lhB, _lhB);
     _lhW.lerpVectors(_lhA, _lhB, lhE);
     this.toLocal(_lhW, _lw);
+    // Same inertial blend for the free hand, in body space.
+    this._lhLast = this._lhLast || _lw.clone();
+    if (this._offLH) { this._lhOff = (this._lhOff || new THREE.Vector3()).subVectors(this._lhLast, _lw); this._offLH = false; }
+    if (this._lhOff) {
+      _lw.add(this._lhOff);
+      this._lhOff.multiplyScalar(Math.exp(-dt / 0.085));
+      if (this._lhOff.lengthSq() < 1e-6) this._lhOff = null;
+      root.localToWorld(_lhW.copy(_lw));
+    }
+    this._lhLast.copy(_lw);
     _pole.set(-0.75, _lw.y > 1.5 ? 1.5 : 0.9, _lw.y > 1.5 ? 0.1 : 0.3);
     root.localToWorld(_pole);
     solveArm(this.arms[1], _lhW, _pole, _tmp);

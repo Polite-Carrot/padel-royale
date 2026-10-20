@@ -4,6 +4,7 @@ import { Character, LOOKS, STROKE_TIMING, strokeLead } from './character.js';
 import { Sfx } from './audio.js';
 import * as Store from './store.js';
 import { Link, CODE_LEN, normalizeCode } from './net.js';
+import { Crowd } from './crowd.js';
 
 // Real padel physics, played back slightly slower than real time.
 const GAME_SPEED = 0.8;
@@ -72,9 +73,13 @@ let D = DIFF[diffKey];
 let F = FORMATS[fmtKey];
 
 // ---------------------------------------------------------------- renderer
+// Phones skip the shadow-map pass (blob shadows instead) and start at a lower resolution that adapts to frame rate.
+const SHADOWS = !isTouch;
+const MAX_DPR = Math.min(window.devicePixelRatio, isTouch ? 2 : 2);
+let dpr = Math.min(MAX_DPR, isTouch ? 1.5 : 2);
 const renderer = new THREE.WebGLRenderer({ canvas: $('scene'), antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouch ? 1.75 : 2));
-renderer.shadowMap.enabled = true;
+renderer.setPixelRatio(dpr);
+renderer.shadowMap.enabled = SHADOWS;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 const scene = new THREE.Scene();
 scene.background = (() => {
@@ -101,8 +106,7 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   if (camera.aspect < 1) {
-    // Portrait framing is fitted per frame in fitPortrait().
-    camera.fov = 50;
+    // Portrait lens and framing are chosen in fitPortrait().
   } else if (isTouch) {
     camera.fov = 44;
     camBase = { y: 7.6, z: 14.4, lookZ: -1.2 };
@@ -118,7 +122,7 @@ resize();
 scene.add(new THREE.HemisphereLight(0xffffff, 0x6f9a62, 1.7));
 const sun = new THREE.DirectionalLight(0xfff2dc, 2.6);
 sun.position.set(-6, 20, 10);
-sun.castShadow = true;
+sun.castShadow = SHADOWS;
 sun.shadow.mapSize.set(isTouch ? 1024 : 2048, isTouch ? 1024 : 2048);
 Object.assign(sun.shadow.camera, { left: -13, right: 13, top: 13, bottom: -13, near: 1, far: 50 });
 sun.shadow.bias = -0.0005;
@@ -175,6 +179,7 @@ function plane(w, h, mat, x, y, z, rotY = 0) {
 
 function buildCourt() {
   const W = COURT.halfW, L = COURT.halfL;
+  const before = new Set(scene.children);
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(160, 160), new THREE.MeshStandardMaterial({ color: 0x66b85a, roughness: 1 }));
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.02;
@@ -212,7 +217,7 @@ function buildCourt() {
   const glassSolid = glassMat(false), glassFaint = glassMat(true);
   const edgeSolid = edgeMat(false), edgeFaint = edgeMat(true);
   const swap = (m, z, solid, faint) => {
-    viewSwap.push({ mesh: m, z, solid, faint, shadow: false });
+    m.userData.swap = { solid, faint, shadow: false, side: Math.sign(z) };
     scene.add(m);
   };
   const edgeBar = (x, y, z, lx, ly, lz) => {
@@ -236,19 +241,22 @@ function buildCourt() {
     }
   };
   // Camera-side panels are faint so they don't block the view of your own half.
-  const fenceMat = (w, h, faint = false) => {
-    const t = fenceTex.clone();
-    t.repeat.set(w / 0.35, h / 0.35);
-    t.needsUpdate = true;
-    return new THREE.MeshBasicMaterial({
-      map: t, transparent: true, opacity: faint ? 0.18 : 1, alphaTest: faint ? 0.05 : 0.4,
-      side: THREE.DoubleSide, depthWrite: !faint,
-    });
+  // One shared material; each panel scales its UVs so the diamond mesh stays 35 cm.
+  const fenceMk = (faint) => new THREE.MeshBasicMaterial({
+    map: fenceTex, transparent: true, opacity: faint ? 0.18 : 1, alphaTest: faint ? 0.05 : 0.4,
+    side: THREE.DoubleSide, depthWrite: !faint,
+  });
+  const fenceSolid = fenceMk(false), fenceFaint = fenceMk(true);
+  const fenceMesh = (w, h, x, y, z, rotY = 0) => {
+    const m = plane(w, h, fenceSolid, x, y, z, rotY);
+    const uv = m.geometry.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * w / 0.35, uv.getY(i) * h / 0.35);
+    return m;
   };
 
   const fencePlane = (w, h, x, y, z, rotY = 0) => {
-    const m = plane(w, h, fenceMat(w, h), x, y, z, rotY);
-    viewSwap.push({ mesh: m, z, solid: m.material, faint: fenceMat(w, h, true), shadow: false });
+    const m = fenceMesh(w, h, x, y, z, rotY);
+    m.userData.swap = { solid: fenceSolid, faint: fenceFaint, shadow: false, side: Math.sign(z) };
   };
   // Padel cage: back walls are 3 m of glass with 1 m of mesh on top. Each side wall has two 2 m panels
   // of 3 m glass at each end (only the corner one has mesh above, to 4 m), and 3 m mesh along the middle.
@@ -263,16 +271,16 @@ function buildCourt() {
   }
   for (const sx of [-1, 1]) {
     const z1 = DOOR.z1;
-    for (const [a, b] of [[-6, -z1], [z1, 6]]) plane(b - a, 3, fenceMat(b - a, 3), sx * W, 1.5, (a + b) / 2, Math.PI / 2);
-    plane(2 * z1, 3 - DOOR.h, fenceMat(2 * z1, 3 - DOOR.h), sx * W, (3 + DOOR.h) / 2, 0, Math.PI / 2);
+    for (const [a, b] of [[-6, -z1], [z1, 6]]) fenceMesh(b - a, 3, sx * W, 1.5, (a + b) / 2, Math.PI / 2);
+    fenceMesh(2 * z1, 3 - DOOR.h, sx * W, (3 + DOOR.h) / 2, 0, Math.PI / 2);
   }
 
   const solidFrame = new THREE.MeshStandardMaterial({ color: 0x1b1f26, roughness: 0.5, metalness: 0.5 });
   const faintFrame = new THREE.MeshStandardMaterial({ color: 0x1b1f26, transparent: true, opacity: 0.25, depthWrite: false });
   const frameMat = solidFrame;
   const frame = (m, z, shadow) => {
-    m.castShadow = shadow;
-    if (Math.abs(z) > 5) viewSwap.push({ mesh: m, z, solid: solidFrame, faint: faintFrame, shadow });
+    m.castShadow = shadow && SHADOWS;
+    if (Math.abs(z) > 5) m.userData.swap = { solid: solidFrame, faint: faintFrame, shadow, side: Math.sign(z) };
     scene.add(m);
   };
   const post = (x, z, h, t = 0.08) => {
@@ -352,6 +360,63 @@ function buildCourt() {
     s.receiveShadow = true;
     scene.add(s);
   }
+
+  const built = scene.children.filter((o) => o.isMesh && !before.has(o));
+  for (const m of mergeStatic(built)) {
+    const sw = m.userData.swap;
+    if (sw) viewSwap.push({ mesh: m, z: sw.side * 10, solid: sw.solid, faint: sw.faint, shadow: sw.shadow });
+  }
+}
+
+// Bakes static meshes that share a material (and view-swap group) into one draw call each.
+function mergeStatic(meshes) {
+  const groups = new Map();
+  for (const m of meshes) {
+    m.updateMatrixWorld(true);
+    const sw = m.userData.swap;
+    const key = `${m.material.uuid}|${m.castShadow}|${m.receiveShadow}|${sw ? `${sw.side}|${sw.faint.uuid}` : ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+  const out = [];
+  const nm = new THREE.Matrix3(), v = new THREE.Vector3();
+  for (const list of groups.values()) {
+    if (list.length < 2) { out.push(list[0]); continue; }
+    let vc = 0, ic = 0;
+    for (const m of list) {
+      const g = m.geometry;
+      vc += g.attributes.position.count;
+      ic += g.index ? g.index.count : g.attributes.position.count;
+    }
+    const pos = new Float32Array(vc * 3), nor = new Float32Array(vc * 3), uvs = new Float32Array(vc * 2), idx = new Uint32Array(ic);
+    let vo = 0, io = 0;
+    for (const m of list) {
+      const g = m.geometry, p = g.attributes.position, n = g.attributes.normal, t = g.attributes.uv;
+      nm.getNormalMatrix(m.matrixWorld);
+      for (let i = 0; i < p.count; i++) {
+        v.fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld).toArray(pos, (vo + i) * 3);
+        v.fromBufferAttribute(n, i).applyMatrix3(nm).normalize().toArray(nor, (vo + i) * 3);
+        if (t) { uvs[(vo + i) * 2] = t.getX(i); uvs[(vo + i) * 2 + 1] = t.getY(i); }
+      }
+      if (g.index) for (let i = 0; i < g.index.count; i++) idx[io++] = g.index.getX(i) + vo;
+      else for (let i = 0; i < p.count; i++) idx[io++] = vo + i;
+      vo += p.count;
+      m.removeFromParent();
+      g.dispose();
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    const merged = new THREE.Mesh(geo, list[0].material);
+    merged.castShadow = list[0].castShadow;
+    merged.receiveShadow = list[0].receiveShadow;
+    merged.userData.swap = list[0].userData.swap;
+    scene.add(merged);
+    out.push(merged);
+  }
+  return out;
 }
 const viewSwap = [];
 buildCourt();
@@ -371,7 +436,7 @@ setViewSide(0);
 // ---------------------------------------------------------------- ball & markers
 const ball = makeBall();
 const ballMesh = new THREE.Mesh(
-  new THREE.SphereGeometry(0.045, 20, 14),
+  new THREE.SphereGeometry(0.065, 20, 14),
   new THREE.MeshStandardMaterial({ color: 0xe8ff3a, emissive: 0x3d4a00, roughness: 0.5 }),
 );
 ballMesh.castShadow = true;
@@ -383,7 +448,7 @@ function flatMesh(geo, color, opacity) {
   scene.add(m);
   return m;
 }
-const ballShadow = flatMesh(new THREE.CircleGeometry(0.06, 20), 0x000000, 0.35);
+const ballShadow = flatMesh(new THREE.CircleGeometry(0.085, 20), 0x000000, 0.35);
 const bounceMarker = flatMesh(new THREE.RingGeometry(0.12, 0.18, 28), 0xffffff, 0.75);
 const interceptMarker = flatMesh(new THREE.RingGeometry(0.32, 0.4, 32), 0xffb020, 0.55);
 const ctrlRing = flatMesh(new THREE.RingGeometry(0.44, 0.54, 32), 0xff7a1a, 0.9);
@@ -391,6 +456,13 @@ bounceMarker.visible = interceptMarker.visible = false;
 const ctrlArrow = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.22, 12), new THREE.MeshBasicMaterial({ color: 0xff7a1a }));
 ctrlArrow.rotation.x = Math.PI;
 scene.add(ctrlArrow);
+const moveMarker = flatMesh(new THREE.RingGeometry(0.16, 0.26, 28), 0xffffff, 0.9);
+moveMarker.visible = false;
+
+// ---------------------------------------------------------------- crowd
+const crowdRows = [];
+for (const sx of [-1, 1]) for (let i = 0; i < 4; i++) crowdRows.push({ x: sx * (10.5 + i * 1.2), y: 0.5 + i * 0.5, face: sx > 0 ? -Math.PI / 2 : Math.PI / 2 });
+const crowd = new Crowd(scene, crowdRows);
 
 // ---------------------------------------------------------------- players
 function makePlayer(team, idx) {
@@ -400,10 +472,11 @@ function makePlayer(team, idx) {
   scene.add(ch.root);
   return {
     team, idx, ch,
-    pos: { x: 0, z: 0 }, vel: { x: 0, z: 0 },
+    pos: { x: 0, z: 0 }, vel: { x: 0, z: 0 }, prev: { x: 0, z: 0 },
     plan: null, pending: null, cooldown: 0, reactT: 0, rolls: null, rollsFor: -1,
     lane: idx === 0 ? rightX(team) : -rightX(team), crossT: 0,
     stats: null, reach: 1.1, speedMax: PLAYER_SPEED,
+    blob: SHADOWS ? null : flatMesh(new THREE.CircleGeometry(0.34, 20), 0x0a1a10, 0.28),
   };
 }
 
@@ -416,7 +489,7 @@ players.forEach((p, i) => {
   const { startSwing, cancelSwing, splitStep, grunt } = ch;
   ch.startSwing = (anim, side, c, now, ct, opts = {}) => {
     startSwing.call(ch, anim, side, c, now, ct, opts);
-    hostSend({ t: 'sw', i, anim, side, c: [c.x, c.y, c.z], ct, j: opts.jump || 0 });
+    hostSend({ t: 'sw', i, anim, side, c: [c.x, c.y, c.z], ct, j: opts.jump || 0, sp: opts.spin || 0 });
   };
   ch.cancelSwing = () => { cancelSwing.call(ch); hostSend({ t: 'cs', i }); };
   ch.splitStep = () => { splitStep.call(ch); hostSend({ t: 'ss', i }); };
@@ -447,6 +520,10 @@ const stick = { active: false, id: null, ox: 0, oy: 0, x: 0, y: 0 };
 const hitBuffer = [null, null];
 const manualSwitchT = [0, 0];
 const ctrl = [0, 0];
+// Tap-to-move target per team, swipe-chosen serve aim, and which teams use touch (swipe) controls.
+const moveTarget = [null, null];
+const serveIntent = [null, null];
+const touchTeam = [isTouch, false];
 let netPaused = false;
 
 function inputAxis() {
@@ -477,7 +554,7 @@ function pressAction(act) {
   actionFor(0, act);
 }
 
-function actionFor(team, act) {
+function actionFor(team, act, intent = null) {
   if (mode !== 'playing' || !isHuman(team)) return;
   if (act === 'switch') {
     ctrl[team] = 1 - ctrl[team];
@@ -486,10 +563,25 @@ function actionFor(team, act) {
     return;
   }
   if (phase === 'preServe' && serve.team === team) {
+    serveIntent[team] = intent;
     startToss();
     return;
   }
-  hitBuffer[team] = { type: act, t: 0.6 };
+  hitBuffer[team] = { type: act, t: 0.6, intent };
+}
+
+// Tap-to-move: the nearer of your two players takes over and runs to the spot.
+function moveFor(team, x, z) {
+  if (mode !== 'playing' || !isHuman(team)) return;
+  x = clamp(x, -8.9, 8.9);
+  z = clamp(z, -10.6, 10.6);
+  // Inside the court you can only use your own half; outside you can go anywhere.
+  if (!isOut(x)) z = clampZ(team, z);
+  const [a, b] = teamPlayers(team);
+  const near = Math.hypot(a.pos.x - x, a.pos.z - z) <= Math.hypot(b.pos.x - x, b.pos.z - z) ? a : b;
+  if (!near.pending) ctrl[team] = near.idx;
+  manualSwitchT[team] = 1.2;
+  moveTarget[team] = { x, z };
 }
 
 window.addEventListener('keydown', (e) => {
@@ -510,53 +602,119 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener('blur', () => keys.clear());
 
-const STICK_R = 55;
-const stickZone = $('stick-zone');
-const stickBase = $('stick-base');
-const stickKnob = $('stick-knob');
+// ---------------------------------------------------------------- touch: tap to move, swipe to shoot
+// Swipes are measured in screen-heights so they feel the same on every phone.
+const gestureZone = $('gesture');
+const swipeFx = $('swipe-fx');
+const swipeCtx = swipeFx.getContext('2d');
+const SWIPE = { tap: 0.025, drop: 0.075, smashV: 2.6, popV: 4.2 };
+let gesture = null;
+let trail = null;
+const _ray = new THREE.Raycaster(), _ndc = new THREE.Vector2(), _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), _hitP = new THREE.Vector3();
+let moveMarkT = 0;
 
-stickZone.addEventListener('pointerdown', (e) => {
-  if (stick.active) return;
+function screenToCourt(cx, cy) {
+  _ndc.set((cx / window.innerWidth) * 2 - 1, -(cy / window.innerHeight) * 2 + 1);
+  _ray.setFromCamera(_ndc, camera);
+  if (!_ray.ray.intersectPlane(_groundPlane, _hitP)) return null;
+  // Back into game coordinates (the guest's world is rotated 180°).
+  const v = myTeam() === 0 ? 1 : -1;
+  return { x: _hitP.x * v, z: _hitP.z * v };
+}
+
+function classifySwipe(g, x, y, t) {
+  const H = window.innerHeight;
+  const dx = (x - g.x0) / H, dy = (y - g.y0) / H;
+  const len = Math.hypot(dx, dy);
+  const dur = Math.max(0.03, (t - g.t0) / 1000);
+  // Flick speed from the last ~90 ms, so a slow start with a fast finish still counts as fast.
+  let k = g.pts.length - 1;
+  while (k > 0 && t - g.pts[k][2] < 90) k--;
+  const [px, py, pt] = g.pts[k];
+  const flick = Math.hypot(x - px, y - py) / H / Math.max(0.016, (t - pt) / 1000);
+  const speed = Math.max(len / dur, flick * 0.8);
+  if (len < SWIPE.tap && dur < 0.35) return { tap: true };
+  if (len < SWIPE.drop) return { k: 'drop', ax: clamp(dx / 0.05, -1, 1), len, speed };
+  if (dy > 0 && dy > Math.abs(dx) * 0.7) return { k: 'lob', ax: clamp(Math.atan2(dx, dy) / 0.7, -1, 1), len, speed };
+  return { k: 'hit', ax: clamp(Math.atan2(dx, -dy) / 0.7, -1, 1), len, speed };
+}
+
+function validIntent(it) {
+  if (!it || typeof it !== 'object' || !['drop', 'lob', 'hit'].includes(it.k)) return null;
+  return { k: it.k, ax: clamp(Number(it.ax) || 0, -1, 1), len: clamp(Number(it.len) || 0, 0, 2), speed: clamp(Number(it.speed) || 0, 0, 20) };
+}
+
+function localSwipe(intent) {
+  if (net.role === 'guest') netSend({ t: 'act', a: 'swipe', i: intent });
+  else actionFor(0, 'swipe', intent);
+}
+
+function localTap(cx, cy) {
+  const c = screenToCourt(cx, cy);
+  if (!c) return;
+  if (net.role === 'guest') netSend({ t: 'mv', x: c.x, z: c.z });
+  else moveFor(0, c.x, c.z);
+  const v = myTeam() === 0 ? 1 : -1;
+  moveMarker.position.set(clamp(c.x, -8.9, 8.9) * v, 0.012, clamp(c.z, -10.6, 10.6) * v);
+  moveMarkT = 0.9;
+  haptic(6);
+}
+
+gestureZone.addEventListener('pointerdown', (e) => {
+  if (mode !== 'playing' || netPaused || gesture) return;
   e.preventDefault();
-  stickZone.setPointerCapture(e.pointerId);
-  Object.assign(stick, { active: true, id: e.pointerId, ox: e.clientX, oy: e.clientY, x: 0, y: 0 });
-  stickBase.style.left = `${e.clientX}px`;
-  stickBase.style.top = `${e.clientY}px`;
-  stickBase.classList.add('active');
-  stickKnob.style.transform = 'translate(-50%, -50%)';
+  gestureZone.setPointerCapture(e.pointerId);
+  const t = performance.now();
+  gesture = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: t, pts: [[e.clientX, e.clientY, t]] };
+  trail = { pts: gesture.pts, fade: 1, kind: null };
 });
-stickZone.addEventListener('pointermove', (e) => {
-  if (!stick.active || e.pointerId !== stick.id) return;
-  let dx = e.clientX - stick.ox, dy = e.clientY - stick.oy;
-  const l = Math.hypot(dx, dy);
-  if (l > STICK_R) { dx *= STICK_R / l; dy *= STICK_R / l; }
-  stick.x = dx / STICK_R;
-  stick.y = -dy / STICK_R;
-  if (Math.abs(stick.x) < 0.12) stick.x = 0;
-  if (Math.abs(stick.y) < 0.12) stick.y = 0;
-  stickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+gestureZone.addEventListener('pointermove', (e) => {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  gesture.pts.push([e.clientX, e.clientY, performance.now()]);
+  if (gesture.pts.length > 40) gesture.pts.splice(1, 1);
 });
-const endStick = (e) => {
-  if (e.pointerId !== stick.id) return;
-  Object.assign(stick, { active: false, id: null, x: 0, y: 0 });
-  stickBase.classList.remove('active');
-  stickBase.style.left = stickBase.style.top = '';
-  stickKnob.style.transform = 'translate(-50%, -50%)';
+const endGesture = (e) => {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  const g = gesture;
+  gesture = null;
+  if (e.type === 'pointercancel' || mode !== 'playing' || netPaused) { trail = null; return; }
+  const t = performance.now();
+  g.pts.push([e.clientX, e.clientY, t]);
+  const it = classifySwipe(g, e.clientX, e.clientY, t);
+  if (it.tap) {
+    trail = null;
+    localTap(e.clientX, e.clientY);
+    return;
+  }
+  trail.kind = it.k === 'lob' ? 'lob' : it.k === 'drop' ? 'drop' : it.speed >= SWIPE.smashV ? 'fast' : 'hit';
+  localSwipe(it);
+  haptic(10);
 };
-stickZone.addEventListener('pointerup', endStick);
-stickZone.addEventListener('pointercancel', endStick);
+gestureZone.addEventListener('pointerup', endGesture);
+gestureZone.addEventListener('pointercancel', endGesture);
 
-document.querySelectorAll('[data-act]').forEach((btn) => {
-  btn.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    btn.classList.add('down');
-    pressAction(btn.dataset.act);
-  });
-  const up = () => btn.classList.remove('down');
-  btn.addEventListener('pointerup', up);
-  btn.addEventListener('pointercancel', up);
-  btn.addEventListener('pointerleave', up);
-});
+const TRAIL_COLORS = { lob: '120,220,255', drop: '200,255,120', fast: '255,90,60', hit: '255,200,80' };
+function drawSwipeTrail(dt) {
+  const w = window.innerWidth, h = window.innerHeight;
+  if (swipeFx.width !== w || swipeFx.height !== h) { swipeFx.width = w; swipeFx.height = h; }
+  swipeCtx.clearRect(0, 0, w, h);
+  if (!trail) return;
+  if (!gesture) trail.fade -= dt * 3.5;
+  if (trail.fade <= 0) { trail = null; return; }
+  const p = trail.pts;
+  if (p.length < 2) return;
+  swipeCtx.lineCap = swipeCtx.lineJoin = 'round';
+  const col = TRAIL_COLORS[trail.kind] || '255,255,255';
+  for (let i = 1; i < p.length; i++) {
+    const u = i / (p.length - 1);
+    swipeCtx.strokeStyle = `rgba(${col},${(0.25 + 0.6 * u) * trail.fade})`;
+    swipeCtx.lineWidth = 4 + 10 * u;
+    swipeCtx.beginPath();
+    swipeCtx.moveTo(p[i - 1][0], p[i - 1][1]);
+    swipeCtx.lineTo(p[i][0], p[i][1]);
+    swipeCtx.stroke();
+  }
+}
 
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 // No zooming of any kind: pinch, double-tap, ctrl+wheel/trackpad pinch or ctrl +/-.
@@ -565,7 +723,7 @@ document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) e.prev
 let lastTouchEnd = 0;
 document.addEventListener('touchend', (e) => {
   const now = performance.now();
-  if (now - lastTouchEnd < 350 && !e.target.closest('button, input')) e.preventDefault();
+  if (e.cancelable && now - lastTouchEnd < 350 && !e.target.closest('button, input')) e.preventDefault();
   lastTouchEnd = now;
 }, { passive: false });
 document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
@@ -641,6 +799,8 @@ function setupServe() {
   rally = null;
   lastPointWinner = null;
   hitBuffer[0] = hitBuffer[1] = null;
+  moveTarget[0] = moveTarget[1] = null;
+  serveIntent[0] = serveIntent[1] = null;
   clearMarkers();
   ctrl[T] = sv.player.idx;
   ctrl[R] = rcv.idx;
@@ -685,7 +845,9 @@ function doServe() {
   const T = serve.team, p = serve.server, box = serve.boxSign;
   let tx, depth;
   if (isHuman(T)) {
-    const a = axisFor(T);
+    const it = serveIntent[T];
+    // Swipe serve: direction aims across the box, swipe length sets the depth.
+    const a = it ? { x: it.ax * rightX(T), y: clamp((it.len - 0.08) / 0.15, 0, 2) - 1 } : axisFor(T);
     tx = box * 2.5 + a.x * 1.9;
     depth = 5.3 + a.y * 1.1;
   } else {
@@ -763,7 +925,9 @@ function findContact(p, horizon) {
         return null;
       }
     }
-    if (sideOf(b.z) !== p.team || (b.outside && !(outPlay && reachableOutside(b)))) { prevD = Infinity; continue; }
+    // Out-of-court play: once the ball has gone out over a side wall it can be chased anywhere outside.
+    const chase = b.outside && outPlay;
+    if ((sideOf(b.z) !== p.team && !chase) || (b.outside && !(outPlay && reachableOutside(b)))) { prevD = Infinity; continue; }
     if (rally.serve && !valid) continue;
     if (b.y < 0.12 || b.y > MAX_HIT_Y) continue;
     if (!valid && Math.abs(p.pos.z) > 5.5 && b.y < 1.9) continue;
@@ -815,13 +979,24 @@ function aiChooseKind(p, c) {
   return 'drive';
 }
 
+// Swipe intent -> stroke. Smashes need a high ball and a very fast swipe; por tres needs an even faster one.
+function swipeKind(it, p, c) {
+  if (it.k === 'lob') return 'lob';
+  if (it.k === 'drop') return 'drop';
+  if (c.y >= 1.9 && it.speed >= SWIPE.smashV) {
+    return c.y >= 2.25 && Math.abs(p.pos.z) < 5 && it.speed >= SWIPE.popV ? 'pop' : 'smash';
+  }
+  return 'drive';
+}
+
 const _contact = new THREE.Vector3();
-function tryCommit(p, type) {
+function tryCommit(p, type, intent = null) {
   if (p.cooldown > 0 || p.pending) return false;
   const c = findContact(p, CONTACT_HORIZON);
   if (!c) return false;
   let kind = type;
   if (type === 'ai') kind = aiChooseKind(p, c);
+  else if (type === 'swipe') kind = swipeKind(intent, p, c);
   else if (type === 'smash') kind = c.y >= 2.25 && Math.abs(p.pos.z) < 5 ? 'pop' : 'smash';
   const s = strokeFor(kind, p, c);
   const lead = strokeLead(s.anim);
@@ -831,16 +1006,20 @@ function tryCommit(p, type) {
   const retry = p.missFor === rally.hitId;
   const whiff = type === 'ai' && Math.random() < D.miss * (1 + incoming / 25) * (retry ? 0.25 : 1);
   if (whiff) p.missFor = rally.hitId;
-  p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed: clamp((lead - c.t) / lead, 0, 1), whiff, whooshed: false };
-  let jump = 0;
-  if (s.anim === 'smash' || s.anim === 'pop') jump = clamp(c.y - 2.3, 0, 0.8) + (s.anim === 'pop' ? 0.08 : 0);
-  else if (s.anim === 'bandeja') jump = clamp(c.y - 2.5, 0, 0.2);
-  p.ch.startSwing(s.anim, s.side, _contact.set(c.x, c.y, c.z), simTime, p.pending.time, { pos: p.pos, jump });
+  p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed: clamp((lead - c.t) / lead, 0, 1), whiff, whooshed: false, intent };
+  let jump = 0, spin = 0;
+  if (s.anim === 'smash' || s.anim === 'pop') {
+    // Anime leap: smashes always get airborne, por tres adds a full spin.
+    jump = Math.max(clamp(c.y - 2.3, 0, 0.8), s.anim === 'pop' ? 0.55 : 0.35);
+    spin = s.anim === 'pop' ? 1 : 0;
+  } else if (s.anim === 'bandeja') jump = clamp(c.y - 2.5, 0, 0.2);
+  p.ch.startSwing(s.anim, s.side, _contact.set(c.x, c.y, c.z), simTime, p.pending.time, { pos: p.pos, jump, spin });
   return true;
 }
 
 function resolveContact(p, pd) {
-  const legal = phase === 'play' && rally && p.team !== rally.lastHit && sideOf(ball.z) === p.team &&
+  const mySide = sideOf(ball.z) === p.team || (ball.outside && rally?.outPlay);
+  const legal = phase === 'play' && rally && p.team !== rally.lastHit && mySide &&
     !(rally.serve && !rally.valid) && (!ball.outside || rally.outPlay);
   const d = Math.hypot(ball.x - p.pos.x, ball.z - p.pos.z);
   if (!legal || d > p.reach * 1.2 || pd.whiff) {
@@ -886,7 +1065,7 @@ function updateSwings() {
     if (buf) type = buf.type;
     else if (p === team[ci] && auto) type = 'drive';
     else continue;
-    if (tryCommit(p, type)) {
+    if (tryCommit(p, type, buf ? buf.intent : null)) {
       hitBuffer[R] = null;
       ctrl[R] = p.idx;
       return;
@@ -908,7 +1087,7 @@ function shotQuality(p, kind, pd) {
   return clamp(q, 0.05, 1);
 }
 
-function performShot(p, kind, tx, depthAdj, pd) {
+function performShot(p, kind, tx, depthAdj, pd, mods = {}) {
   const team = p.team, dir = -sideZ(team), st = p.stats;
   const q = shotQuality(p, kind, pd);
   const fromOutside = Math.abs(ball.x) > COURT.halfW;
@@ -944,6 +1123,14 @@ function performShot(p, kind, tx, depthAdj, pd) {
     }
     case 'drop': depth = 2.4; vh = 8.5; top = -130; clear = 0.15; break;
   }
+  // Swipe shots: length/speed choose depth, pace and lob height (a mistimed lob still drops short).
+  if (kind === 'lob' && mods.lobT) {
+    const bad = 1 - q;
+    T = mods.lobT * (1 - bad * 0.3);
+    clear = mods.lobClear * (0.6 + 0.4 * q);
+    depth = mods.depth - bad * (1 + Math.random() * 2.5);
+  } else if (mods.depth != null && kind !== 'pop') depth = mods.depth;
+  if (mods.vhMul) vh *= mods.vhMul;
   depth = clamp(depth + depthAdj, 2.0, 9.2);
   tx = clamp(tx, -4.5, 4.5);
   vh *= st.power * (0.75 + 0.25 * q);
@@ -976,10 +1163,32 @@ function finishHit(p, kind, speed) {
   const buzz = kind === 'pop' ? 35 : kind === 'smash' ? 25 : 12;
   if (team === 0) haptic(buzz);
   else hostSend({ t: 'hap', ms: buzz });
+  moveTarget[team] = null;
+  if (kind === 'smash' || kind === 'pop') smashFx(kind, ball.x, ball.y, ball.z, isHuman(team) || kind === 'pop');
   afterHit(team, kind);
 }
 
+const ramp = (lo, hi, v) => clamp((v - lo) / (hi - lo), 0, 1);
 function humanShot(p, pd) {
+  const it = pd.intent;
+  if (it) {
+    const vs = rightX(p.team);
+    let tx = it.ax * 4.2 * vs;
+    let mods;
+    if (pd.kind === 'lob' && it.k === 'lob') {
+      // Longer swipe = higher lob; faster swipe = deeper lob.
+      const hgt = ramp(0.07, 0.42, it.len);
+      mods = { lobT: 1.5 + 1.3 * hgt, lobClear: 0.6 + 2.2 * hgt, depth: 5.6 + 3.4 * ramp(0.4, 2.6, it.speed) };
+    } else if (pd.kind === 'drop') {
+      tx = it.ax * 2.8 * vs;
+      mods = { depth: 1.8 + 1.4 * ramp(SWIPE.tap, SWIPE.drop, it.len) };
+    } else {
+      // Faster swipe = faster ball; longer swipe = deeper ball.
+      mods = { vhMul: 0.7 + 0.6 * ramp(0.6, 3.6, it.speed), depth: 4.2 + 4.8 * ramp(0.08, 0.42, it.len) };
+    }
+    performShot(p, pd.kind, tx, 0, pd, mods);
+    return;
+  }
   const a = axisFor(p.team);
   const tx = Math.abs(a.x) > 0.2 ? a.x * 3.6 : -ball.x * 0.6;
   const depthAdj = a.y > 0.2 ? a.y * 1.3 : a.y < -0.2 ? a.y * 2.8 : 0;
@@ -1050,7 +1259,7 @@ function predictFor(team) {
       }
     }
     if (stop) break;
-    if (sideOf(b.z) === team && b.y > 0.08 && b.y < MAX_HIT_Y && (!r.serve || r.valid) &&
+    if ((sideOf(b.z) === team || (b.outside && r.outPlay)) && b.y > 0.08 && b.y < MAX_HIT_Y && (!r.serve || r.valid) &&
       (!b.outside || (r.outPlay && reachableOutside(b)))) {
       samples.push({ t, x: b.x, y: b.y, z: b.z, bounced: r.valid });
     }
@@ -1059,8 +1268,9 @@ function predictFor(team) {
 }
 
 function clampZ(team, z, outside = false) {
-  const lim = outside ? 10.6 : 9.75;
-  return team === 0 ? clamp(z, 0.4, lim) : clamp(z, -lim, -0.4);
+  // Outside the cage players may run the full length, past the net line, to chase a ball.
+  if (outside) return clamp(z, -10.6, 10.6);
+  return team === 0 ? clamp(z, 0.4, 9.75) : clamp(z, -9.75, -0.4);
 }
 
 const doorZ = (team) => sideZ(team) * (DOOR.z0 + DOOR.z1) / 2;
@@ -1313,7 +1523,8 @@ function winnerOutReason() {
 const DOOR_Z0 = DOOR.z0 + 0.2, DOOR_Z1 = DOOR.z1 - 0.2;
 const inDoorway = (z) => Math.abs(z) > DOOR_Z0 && Math.abs(z) < DOOR_Z1;
 
-// Walls block players except at the doors; outside they can roam the side areas of their half.
+// Walls block players except at the doors. Outside, players can roam the whole length of the court,
+// but may only come back in through a door on their own half.
 function movePlayer(p, dt, desiredX, desiredZ) {
   const k = Math.min(1, dt * 10);
   p.vel.x += (desiredX - p.vel.x) * k;
@@ -1322,7 +1533,8 @@ function movePlayer(p, dt, desiredX, desiredZ) {
   let nx = p.pos.x + p.vel.x * dt;
   let nz = clampZ(p.team, p.pos.z + p.vel.z * dt, wasOut);
   const sx = Math.sign(nx) || 1, ax = Math.abs(nx);
-  if (!inDoorway(nz)) {
+  const ownDoor = inDoorway(nz) && sideOf(nz) === p.team;
+  if (!ownDoor) {
     if (wasOut && ax < 5.25) nx = sx * 5.25;
     else if (!wasOut && ax > 4.75) nx = sx * 4.75;
   }
@@ -1350,7 +1562,19 @@ function updatePlayers(dt) {
     const slow = p.pending ? 0.3 : p.ch.swinging ? 0.6 : 1;
     if (isHuman(p.team) && p === teamPlayers(p.team)[ctrl[p.team]]) {
       const a = axisFor(p.team);
-      movePlayer(p, dt, a.x * p.speedMax * slow, -sideZ(p.team) * a.y * p.speedMax * slow);
+      const mt = moveTarget[p.team];
+      if (Math.hypot(a.x, a.y) > 0.05) {
+        moveTarget[p.team] = null;
+        movePlayer(p, dt, a.x * p.speedMax * slow, -sideZ(p.team) * a.y * p.speedMax * slow);
+      } else if (mt) {
+        seek(p, dt, mt.x, mt.z, slow);
+      } else if (touchTeam[p.team]) {
+        // Touch assist: with no tap target, run to the incoming ball (or back into position).
+        const tgt = p.plan || formationTarget(p);
+        seek(p, dt, tgt.x, tgt.z, slow);
+      } else {
+        movePlayer(p, dt, 0, 0);
+      }
       // If you deliberately run deep into your partner's half, they swap over to cover yours.
       const partner = teamPlayers(p.team)[1 - ctrl[p.team]];
       const crossed = !isOut(p.pos.x) && Math.sign(p.pos.x) === partner.lane && Math.abs(p.pos.x) > 1.4;
@@ -1443,55 +1667,80 @@ function wrapAngle(a) {
   return a;
 }
 
-function updateVisuals(dt) {
-  ballMesh.position.set(ball.x, ball.y, ball.z);
-  ballShadow.position.set(ball.x, 0.006, ball.z);
-  const sh = clamp(1 - ball.y / 8, 0.3, 1);
-  ballShadow.scale.setScalar(0.8 + ball.y * 0.15);
+function updateVisuals(dt, rdt) {
+  camera.position.sub(_shake);
+  // Draw between the last two physics steps so motion is smooth at any frame rate.
+  const a = renderAlpha;
+  const bx = lerp(ballPrev.x, ball.x, a), by = lerp(ballPrev.y, ball.y, a), bz = lerp(ballPrev.z, ball.z, a);
+  ballMesh.position.set(bx, by, bz);
+  ballShadow.position.set(bx, 0.006, bz);
+  const sh = clamp(1 - by / 8, 0.3, 1);
+  ballShadow.scale.setScalar(0.8 + by * 0.15);
   ballShadow.material.opacity = 0.35 * sh;
-  ballShadow.visible = Math.abs(ball.x) < 9.5 && Math.abs(ball.z) < 12.5;
+  ballShadow.visible = Math.abs(bx) < 9.5 && Math.abs(bz) < 12.5;
 
-  _look.set(ball.x, ball.y, ball.z);
+  _look.set(bx, by, bz);
   const celebrate = phase === 'pointOver' || mode === 'over';
   const winner = mode === 'over' ? matchWinner : lastPointWinner;
+  const visTime = simTime - (1 - a) * DT;
   for (const p of players) {
+    const px = lerp(p.prev.x, p.pos.x, a), pz = lerp(p.prev.z, p.pos.z, a);
     const base = baseYaw(p.team);
     const holding = phase === 'preServe' && serve && p === serve.server;
     let yaw = base;
     if (!holding) {
-      const want = Math.atan2(-(ball.x - p.pos.x), -(ball.z - p.pos.z));
+      const want = Math.atan2(-(bx - px), -(bz - pz));
       yaw = base + clamp(wrapAngle(want - base), -0.7, 0.7);
     }
     p.ch.update(dt, {
-      simTime, yaw, look: _look,
-      x: p.pos.x, z: p.pos.z, vx: p.vel.x, vz: p.vel.z,
+      simTime: visTime, yaw, look: _look,
+      x: px, z: pz, vx: p.vel.x, vz: p.vel.z,
       alert: phase === 'play' && !!rally && rally.lastHit !== p.team,
       mood: celebrate && winner !== null ? (p.team === winner ? 'happy' : 'sad') : null,
       holdBall: holding,
     });
+    if (p.blob) {
+      p.blob.position.set(px, 0.007, pz);
+      const lift = p.ch.root.position.y;
+      p.blob.scale.setScalar(1 - Math.min(0.5, lift * 0.6));
+    }
   }
 
   const me = myTeam();
   const ctrlP = teamPlayers(me)[ctrl[me]];
+  const cx = lerp(ctrlP.prev.x, ctrlP.pos.x, a), cz = lerp(ctrlP.prev.z, ctrlP.pos.z, a);
   const showCtrl = mode === 'playing' || mode === 'paused';
   ctrlRing.visible = ctrlArrow.visible = showCtrl;
-  ctrlRing.position.set(ctrlP.pos.x, 0.009, ctrlP.pos.z);
-  ctrlArrow.position.set(ctrlP.pos.x, 2.25 + Math.sin(performance.now() / 200) * 0.05, ctrlP.pos.z);
+  ctrlRing.position.set(cx, 0.009, cz);
+  ctrlArrow.position.set(cx, 2.45 + Math.sin(performance.now() / 200) * 0.05, cz);
+  moveMarkT = Math.max(0, moveMarkT - rdt);
+  moveMarker.visible = moveMarkT > 0 && showCtrl;
+  if (moveMarker.visible) {
+    moveMarker.material.opacity = Math.min(1, moveMarkT * 2) * 0.9;
+    moveMarker.scale.setScalar(1 + (0.9 - moveMarkT) * 0.6);
+  }
+
+  crowd.update(rdt);
+  updateFx(rdt, bx, by, bz);
 
   // Camera x is in view space; the guest's world is spun 180°.
-  const k = Math.min(1, dt * 2.5);
+  const k = Math.min(1, rdt * 2.5);
   if (camera.aspect < 1) {
     fitPortrait(me);
     camera.position.lerp(_fitPos, k);
     camLook.lerp(_fitLook, k);
   } else {
-    const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (ball.x * 0.25 + ctrlP.pos.x * 0.15) * rightX(me);
+    if (camera.view) camera.clearViewOffset();
+    const camX = mode === 'menu' ? Math.sin(performance.now() / 4000) * 6 : (bx * 0.25 + cx * 0.15) * rightX(me);
     camera.position.x = lerp(camera.position.x, camX, k);
     camera.position.y = lerp(camera.position.y, camBase.y, k);
     camera.position.z = lerp(camera.position.z, camBase.z, k);
     camLook.set(camera.position.x * 0.4, 0.3, camBase.lookZ);
   }
   camera.lookAt(camLook);
+  const amp = fx.shake * fx.shake * 0.6;
+  _shake.set((Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp * 0.5);
+  camera.position.add(_shake);
   const dc = AUTOPILOT && window.__cam;
   if (dc && dc.follow !== undefined) {
     const fp = players[dc.follow].pos;
@@ -1503,19 +1752,135 @@ function updateVisuals(dt) {
   }
 }
 
+// ---------------------------------------------------------------- smash FX
+// Camera shake, speed lines, an impact burst and a comet trail.
+const fx = { shake: 0, trail: 0, burst: -1 };
+const _shake = new THREE.Vector3();
+const burstSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: (() => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const g = c.getContext('2d');
+    g.translate(128, 128);
+    const grad = g.createRadialGradient(0, 0, 0, 0, 0, 128);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.25, 'rgba(255,230,120,0.9)');
+    grad.addColorStop(1, 'rgba(255,120,40,0)');
+    g.fillStyle = grad;
+    g.beginPath();
+    for (let i = 0; i < 28; i++) {
+      const ang = (i / 28) * Math.PI * 2, r = i % 2 ? 40 : 90 + Math.random() * 38;
+      g.lineTo(Math.cos(ang) * r, Math.sin(ang) * r);
+    }
+    g.closePath();
+    g.fill();
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  })(),
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+}));
+burstSprite.visible = false;
+scene.add(burstSprite);
+const TRAIL_N = 16;
+const trailMesh = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(0.06, 8, 6),
+  new THREE.MeshBasicMaterial({ color: 0xffa52e, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }),
+  TRAIL_N,
+);
+trailMesh.frustumCulled = false;
+trailMesh.count = 0;
+scene.add(trailMesh);
+const trailPts = [];
+const _tm = new THREE.Matrix4();
+
+function restartAnim(el, cls) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+}
+
+function renderSmashFx(kind, x, y, z, full) {
+  const big = kind === 'pop';
+  fx.trail = 1.5;
+  fx.burst = 0;
+  burstSprite.position.set(x, y, z);
+  if (!full) {
+    fx.shake = Math.max(fx.shake, 0.22);
+    return;
+  }
+  fx.shake = big ? 0.6 : 0.42;
+  restartAnim($('speedlines'), 'show');
+  crowd.celebrate(big ? 1 : 0.75);
+  sfx.crowd(big ? 1.1 : 0.7, big);
+}
+
+function smashFx(kind, x, y, z, full) {
+  renderSmashFx(kind, x, y, z, full);
+  hostSend({ t: 'fx', k: kind, p: [x, y, z], f: full });
+}
+
+function updateFx(rdt, bx, by, bz) {
+  fx.shake = Math.max(0, fx.shake - rdt * 1.2);
+  if (fx.burst >= 0) {
+    fx.burst += rdt;
+    const u = fx.burst / 0.45;
+    if (u >= 1) { fx.burst = -1; burstSprite.visible = false; }
+    else {
+      burstSprite.visible = true;
+      burstSprite.scale.setScalar(0.4 + 3.2 * Math.sqrt(u));
+      burstSprite.material.opacity = 1 - u * u;
+      burstSprite.material.rotation = u * 0.6;
+    }
+  }
+  fx.trail = Math.max(0, fx.trail - rdt);
+  const fast = mode === 'playing' && phase === 'play' && Math.hypot(ball.vx, ball.vy, ball.vz) > 21;
+  if (fx.trail > 0 || fast) {
+    trailPts.unshift(bx, by, bz);
+    if (trailPts.length > TRAIL_N * 3) trailPts.length = TRAIL_N * 3;
+  } else if (trailPts.length) {
+    trailPts.length = Math.max(0, trailPts.length - 6);
+  }
+  const n = trailPts.length / 3;
+  trailMesh.count = n;
+  trailMesh.material.color.setHex(fx.trail > 0 ? 0xff7a2e : 0xffd060);
+  for (let i = 0; i < n; i++) {
+    const s = (1 - i / TRAIL_N) * (fx.trail > 0 ? 1.4 : 0.9);
+    _tm.makeScale(s, s, s).setPosition(trailPts[i * 3], trailPts[i * 3 + 1], trailPts[i * 3 + 2]);
+    trailMesh.setMatrixAt(i, _tm);
+  }
+  trailMesh.instanceMatrix.needsUpdate = true;
+}
+
 // ---------------------------------------------------------------- portrait camera
 // Portrait keeps a normal lens and a fixed viewing angle; the camera slides along that angle until the
 // whole court (plus your players, if they run outside) fits between the HUD and the controls.
 const PORTRAIT_PITCH = 0.52;
 const _fitPos = new THREE.Vector3(), _fitLook = new THREE.Vector3();
+// Fit to the playing surface and the top of the far glass; walls nearer the camera may crop slightly.
 const FIT_COURT = [
-  [-5, 0, 10.2], [5, 0, 10.2], [-5, 0, -10], [5, 0, -10], [-5, 4, -10], [5, 4, -10], [-5, 3, 0], [5, 3, 0],
+  [-5, 0, 10.1], [5, 0, 10.1], [-5, 0, -10], [5, 0, -10], [-5, 3.2, -10], [5, 3.2, -10],
 ];
 const fitPts = [];
+let fitHud = { h: 0, px: 0 };
 let fitMid = 0;
+const PORTRAIT_FOV = 30;
+// Fraction of the whole-court distance used during play (lower = closer).
+const PORTRAIT_ZOOM = 0.62;
 function fitPortrait(me) {
   fitPts.length = 0;
   for (const p of FIT_COURT) fitPts.push(p);
+  const h = window.innerHeight;
+  const hudOn = !$('hud').classList.contains('hidden');
+  // Measuring the HUD forces a layout pass, so cache it until the window changes.
+  if (hudOn && fitHud.h !== h) fitHud = { h, px: $('scoreboard').offsetTop + $('scoreboard').offsetHeight + 6 };
+  const topPx = hudOn ? fitHud.px : 16;
+  const mTop = (2 * topPx) / h, mBot = 20 / h;
+  // A long lens maximises how much of a tall screen the whole court can fill at this angle.
+  if (camera.fov !== PORTRAIT_FOV) {
+    camera.fov = PORTRAIT_FOV;
+    camera.updateProjectionMatrix();
+  }
   if (mode !== 'menu') {
     // View coordinates: the guest's world is rotated 180°.
     const v = me === 0 ? 1 : -1;
@@ -1524,12 +1889,57 @@ function fitPortrait(me) {
       fitPts.push([x - 0.7, 0, z], [x + 0.7, 0, z], [x, 2.1, z]);
     }
   }
-  const h = window.innerHeight;
-  const hudOn = !$('hud').classList.contains('hidden');
-  const topPx = hudOn ? $('scoreboard').offsetTop + $('scoreboard').offsetHeight + 6 : 16;
-  const botPx = hudOn && isTouch ? h * 0.1 : 12;
-  const mTop = (2 * topPx) / h, mBot = (2 * botPx) / h, mSide = 0.03;
-  const th = Math.tan((camera.fov * Math.PI) / 360), tw = th * camera.aspect;
+  const r = fitCourt(camera.fov, mTop, mBot);
+  const s = Math.sin(PORTRAIT_PITCH), c = Math.cos(PORTRAIT_PITCH);
+  let d = r.d, lx = r.cx, lz = r.z, mid = r.mid;
+  if (mode !== 'menu') {
+    // In play: zoom in on the action and follow a point between the ball and your player.
+    const v = me === 0 ? 1 : -1;
+    const cp = teamPlayers(me)[ctrl[me]];
+    const focusX = ball.x * v * 0.6 + cp.pos.x * v * 0.4, focusZ = ball.z * v * 0.6 + cp.pos.z * v * 0.4;
+    d = r.d * PORTRAIT_ZOOM;
+    lx = clamp(focusX * 0.85, -3.5, 3.5);
+    lz = r.z + (focusZ - r.z) * 0.8;
+    mid = 0;
+    // Never show grass past either end: near baseline stays at/below the screen bottom, far glass at/above the HUD.
+    const th = Math.tan((camera.fov * Math.PI) / 360);
+    const lift = (mTop - mBot) / 2;
+    const solveTz = (dist, y, z, target) => {
+      let lo = -16, hi = 16;
+      for (let i = 0; i < 22; i++) {
+        const m = (lo + hi) / 2;
+        const vy = y - dist * s, vz = z - (m + dist * c);
+        if ((c * vy - s * vz) / ((-s * vy - c * vz) * th) < target) lo = m; else hi = m;
+      }
+      return (lo + hi) / 2;
+    };
+    const slack = (dist) => solveTz(dist, 3.2, -10, 1 + lift - mTop) - solveTz(dist, 0, 10.1, -1 + lift);
+    // Close enough that the court is at least as tall as the screen.
+    if (slack(d) > 0) {
+      let lo = d * 0.4, hi = d;
+      for (let i = 0; i < 18; i++) {
+        const m = (lo + hi) / 2;
+        if (slack(m) > 0) hi = m; else lo = m;
+      }
+      d = lo;
+    }
+    const tzNear = solveTz(d, 0, 10.1, -1 + lift);
+    const tzFar = solveTz(d, 3.2, -10, 1 + lift - mTop);
+    lz = clamp(lz, Math.min(tzFar, tzNear), tzNear);
+  }
+  _fitLook.set(lx, 0, lz);
+  _fitPos.set(lx, d * s, lz + d * c);
+  // Lens shift: keep the subject centred in the space below the HUD.
+  const shiftPx = (mid - (mBot - mTop) / 2) * h / 2;
+  portraitShift = lerp(portraitShift, shiftPx, 0.2);
+  camera.setViewOffset(window.innerWidth, h, 0, portraitShift, window.innerWidth, h);
+}
+let portraitShift = 0;
+
+// Closest camera distance (along the fixed pitch) that keeps every fit point on screen, centred vertically.
+function fitCourt(fov, mTop, mBot) {
+  const mSide = 0.012;
+  const th = Math.tan((fov * Math.PI) / 360), tw = th * camera.aspect;
   const s = Math.sin(PORTRAIT_PITCH), c = Math.cos(PORTRAIT_PITCH);
   let minX = Infinity, maxX = -Infinity;
   for (const p of fitPts) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]); }
@@ -1549,8 +1959,8 @@ function fitPortrait(me) {
     return true;
   };
   let bestD = Infinity;
-  for (let tz = -8; tz <= 8; tz += 0.25) {
-    let lo = 3, hi = 90;
+  for (let tz = -8; tz <= 8; tz += 0.5) {
+    let lo = 2, hi = 120;
     if (!fits(tz, hi)) continue;
     for (let i = 0; i < 16; i++) {
       const mid = (lo + hi) / 2;
@@ -1559,25 +1969,16 @@ function fitPortrait(me) {
     bestD = Math.min(bestD, hi);
   }
   if (!isFinite(bestD)) bestD = 30;
-  // At the closest distance that works, centre the court between the HUD and the controls.
-  const d = bestD * 1.02, band = (mBot - mTop) / 2;
-  let bestZ = 0, bestOff = Infinity;
+  const d = bestD * 1.01, band = (mBot - mTop) / 2;
+  let bestZ = 0, bestOff = Infinity, mid = 0;
   for (let tz = -8; tz <= 8; tz += 0.1) {
     if (!fits(tz, d)) continue;
     const off = Math.abs(fitMid - band);
-    if (off < bestOff) { bestOff = off; bestZ = tz; }
+    if (off < bestOff) { bestOff = off; bestZ = tz; mid = fitMid; }
   }
-  // Phones zoom in past the full-court fit and pan with the ball to keep the action large.
-  const zoom = isTouch ? 0.7 : 1;
-  let lx = cx, lz = bestZ;
-  if (mode !== 'menu') {
-    const v = me === 0 ? 1 : -1;
-    lx = cx + clamp(ball.x * v - cx, -4.5, 4.5) * (isTouch ? 0.6 : 0.25);
-    lz = bestZ + clamp(ball.z * v - bestZ, -8, 8) * (isTouch ? 0.3 : 0);
-  }
-  _fitLook.set(lx, 0, lz);
-  _fitPos.set(lx, d * zoom * s, lz + d * zoom * c);
+  return { cx, d, z: bestZ, mid };
 }
+
 
 // ---------------------------------------------------------------- HUD & menus
 function setHint(t) {
@@ -1609,6 +2010,7 @@ function renderAnnounce(s) {
     if (mine) sfx.crowd(s.big ? 1.3 : 0.8, !!s.big);
     else sfx.crowd(s.big ? 0.6 : 0.35, false);
     if (mine) haptic(30);
+    crowd.celebrate(s.big ? 1 : mine ? 0.45 : 0.25);
   } else if (s.k === 'chase') {
     if (s.team === me) showMessage('Out of the court!', 'Run out through the door', 'neutral');
   } else {
@@ -1622,9 +2024,8 @@ function announce(s) {
 }
 
 function renderHint(h) {
-  const t = h && h.team === myTeam()
-    ? `${h.second ? 'Second serve' : 'Your serve'} — ${isTouch ? 'tap DRIVE' : 'press SPACE'} (aim with ${isTouch ? 'stick' : 'arrows'})`
-    : '';
+  const how = isTouch ? 'swipe up to serve (direction aims)' : 'press SPACE (aim with arrows)';
+  const t = h && h.team === myTeam() ? `${h.second ? 'Second serve' : 'Your serve'} — ${how}` : '';
   setHint(t);
 }
 
@@ -1762,6 +2163,7 @@ function enterMatchUI() {
   $('kb-help').classList.toggle('hidden', isTouch);
   netPaused = false;
   mode = 'playing';
+  Object.assign(fx, { shake: 0, trail: 0 });
   setViewSide(myTeam());
 }
 
@@ -1984,7 +2386,7 @@ async function joinOnline(raw) {
   net.role = 'guest';
   net.lastRecv = performance.now();
   onlineStatus('Connected — waiting for the host…');
-  netSend({ t: 'hello', rc: myRacketColor() });
+  netSend({ t: 'hello', rc: myRacketColor(), touch: isTouch });
 }
 
 function inviteUrl() {
@@ -2013,6 +2415,7 @@ function onHostData(d) {
   switch (d.t) {
     case 'hello':
       net.guestColor = (Number(d.rc) || 0) & 0xffffff;
+      touchTeam[1] = d.touch === true;
       if (mode !== 'playing') startMatch();
       break;
     case 'in': {
@@ -2024,7 +2427,13 @@ function onHostData(d) {
       break;
     }
     case 'act':
-      if (ACTS.includes(d.a)) actionFor(1, d.a);
+      if (d.a === 'swipe') {
+        const it = validIntent(d.i);
+        if (it) actionFor(1, 'swipe', it);
+      } else if (ACTS.includes(d.a)) actionFor(1, d.a);
+      break;
+    case 'mv':
+      if (Number.isFinite(d.x) && Number.isFinite(d.z)) moveFor(1, d.x, d.z);
       break;
     case 'rematch':
       net.rematch.them = true;
@@ -2080,8 +2489,11 @@ function guestEvent(d) {
       break;
     case 'sw':
       if (p && STROKE_TIMING[d.anim] && Array.isArray(d.c)) {
-        p.ch.startSwing(d.anim, d.side === -1 ? -1 : 1, new THREE.Vector3(...d.c.map(Number)), simTime, Number(d.ct), { pos: p.pos, jump: Number(d.j) || 0 });
+        p.ch.startSwing(d.anim, d.side === -1 ? -1 : 1, new THREE.Vector3(...d.c.map(Number)), simTime, Number(d.ct), { pos: p.pos, jump: Number(d.j) || 0, spin: Number(d.sp) || 0 });
       }
+      break;
+    case 'fx':
+      if ((d.k === 'smash' || d.k === 'pop') && Array.isArray(d.p)) renderSmashFx(d.k, ...d.p.slice(0, 3).map(Number), d.f === true);
       break;
     case 'cs': p?.ch.cancelSwing(); break;
     case 'ss': p?.ch.splitStep(); break;
@@ -2202,20 +2614,50 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) pause
 // ---------------------------------------------------------------- loop
 let last = performance.now();
 let acc = 0;
+let renderAlpha = 1;
+const ballPrev = { x: 0, y: 0, z: 0 };
+function savePrev() {
+  ballPrev.x = ball.x; ballPrev.y = ball.y; ballPrev.z = ball.z;
+  for (const p of players) { p.prev.x = p.pos.x; p.prev.z = p.pos.z; }
+}
+
+// Dynamic resolution: drop the pixel ratio when frames are slow, creep back up (never past a level that was too slow).
+const perf = { t: 0, n: 0, cap: MAX_DPR };
+function adaptResolution(realDt) {
+  perf.t += realDt;
+  perf.n++;
+  if (perf.t < 1.5) return;
+  const avg = perf.t / perf.n;
+  perf.t = perf.n = 0;
+  let next = dpr;
+  if (avg > 1 / 48 && dpr > 1) { perf.cap = dpr - 0.25; next = Math.max(1, dpr - 0.25); }
+  else if (avg < 1 / 57 && dpr + 0.25 <= perf.cap) next = dpr + 0.25;
+  if (next !== dpr) {
+    dpr = next;
+    renderer.setPixelRatio(dpr);
+    resize();
+  }
+}
+
 function frame(now) {
   requestAnimationFrame(frame);
   const realDt = Math.min(0.05, (now - last) / 1000);
   last = now;
+  adaptResolution(realDt);
+  renderAlpha = 1;
   if (mode === 'playing' && net.role !== 'guest') {
     acc += realDt * GAME_SPEED;
     while (acc >= DT) {
+      savePrev();
       simStep(DT);
       acc -= DT;
       if (mode !== 'playing') { acc = 0; break; }
     }
+    renderAlpha = mode === 'playing' ? acc / DT : 1;
   }
   netTick(now, realDt);
-  updateVisuals(realDt * (mode === 'playing' ? GAME_SPEED : 1));
+  updateVisuals(realDt * (mode === 'playing' ? GAME_SPEED : 1), realDt);
+  drawSwipeTrail(realDt);
   renderer.render(scene, camera);
 }
 
@@ -2232,7 +2674,7 @@ if (AUTOPILOT) {
   window.__padel = {
     ball, players, planTeam, predictFor, bestIntercept,
     step: (n) => { for (let i = 0; i < n && mode === 'playing'; i++) simStep(DT); },
-    render: () => { updateVisuals(1 / 60); renderer.render(scene, camera); },
+    render: () => { updateVisuals(1 / 60, 1 / 60); renderer.render(scene, camera); },
     get rally() { return rally; }, get phase() { return phase; }, get simTime() { return simTime; },
   };
 }

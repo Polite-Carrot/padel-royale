@@ -29,15 +29,12 @@
   </div>
 
   <div id="touch" class="hidden">
-    <div id="stick-zone"></div>
-    <div id="stick-base"><div id="stick-knob"></div></div>
-    <div id="btns">
-      <button class="tbtn drive" data-act="drive">DRIVE</button>
-      <button class="tbtn lob" data-act="lob">LOB</button>
-      <button class="tbtn smash" data-act="smash">SMASH<small>drop if low</small></button>
-      <button class="tbtn switch" data-act="switch">SWITCH</button>
-    </div>
+    <div id="gesture"></div>
+    <canvas id="swipe-fx"></canvas>
+    <div id="touch-help">Tap to move · Swipe up to hit · Swipe down to lob · Tiny flick = drop · Fast swipe on a high ball = SMASH</div>
   </div>
+
+  <div id="speedlines"></div>
 
   <div id="menu" class="overlay">
     <div class="panel">
