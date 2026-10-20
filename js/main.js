@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import { BALL_R, COURT, DOOR, makeBall, cloneBall, stepBall, solveShot } from './physics.js';
 import { Character, LOOKS, STROKE_TIMING, strokeLead } from './character.js';
 import { Sfx } from './audio.js';
@@ -1853,94 +1853,72 @@ function updateFx(rdt, bx, by, bz) {
 }
 
 // ---------------------------------------------------------------- portrait camera
-// Portrait keeps a normal lens and a fixed viewing angle; the camera slides along that angle until the
-// whole court (plus your players, if they run outside) fits between the HUD and the controls.
-const PORTRAIT_PITCH = 0.52;
+// Menu: the whole court, centred. In play (Tennis Clash style): a broadcast camera behind your baseline
+// that keeps ~8 m of your end in shot (the side walls crop), slides sideways with your player and the
+// ball, always keeps the far baseline in view, and pulls back only when it must (lobs, wide balls,
+// players outside). All motion is eased by the camera lerp in updateVisuals.
 const _fitPos = new THREE.Vector3(), _fitLook = new THREE.Vector3();
-// Fit to the playing surface and the top of the far glass; walls nearer the camera may crop slightly.
 const FIT_COURT = [
-  [-5, 0, 10.1], [5, 0, 10.1], [-5, 0, -10], [5, 0, -10], [-5, 3.2, -10], [5, 3.2, -10],
+  [-5, 0, 10], [5, 0, 10], [-5, 0, -10], [5, 0, -10], [-5, 3, -10], [5, 3, -10],
 ];
 const fitPts = [];
 let fitHud = { h: 0, px: 0 };
-let fitMid = 0;
+let fitMid = 0, fitSpan = 0;
 const PORTRAIT_FOV = 30;
-// Fraction of the whole-court distance used during play (lower = closer).
-const PORTRAIT_ZOOM = 0.62;
+const CLASH = { pitch: 0.62, fov: 42, nearHalf: 2.2, farHalf: 2.2, follow: 3.2 };
+let portraitPitch = 0.52;
+let clashX = 0;
 function fitPortrait(me) {
   fitPts.length = 0;
-  for (const p of FIT_COURT) fitPts.push(p);
   const h = window.innerHeight;
   const hudOn = !$('hud').classList.contains('hidden');
   // Measuring the HUD forces a layout pass, so cache it until the window changes.
   if (hudOn && fitHud.h !== h) fitHud = { h, px: $('scoreboard').offsetTop + $('scoreboard').offsetHeight + 6 };
   const topPx = hudOn ? fitHud.px : 16;
-  const mTop = (2 * topPx) / h, mBot = 20 / h;
-  // A long lens maximises how much of a tall screen the whole court can fill at this angle.
-  if (camera.fov !== PORTRAIT_FOV) {
-    camera.fov = PORTRAIT_FOV;
+  const mTop = (2 * topPx) / h, mBot = 0;
+  const playing = mode !== 'menu';
+  const fov = playing ? CLASH.fov : PORTRAIT_FOV;
+  if (camera.fov !== fov) {
+    camera.fov = fov;
     camera.updateProjectionMatrix();
   }
-  if (mode !== 'menu') {
+  portraitPitch = playing ? CLASH.pitch : 0.52;
+  if (!playing) {
+    for (const p of FIT_COURT) fitPts.push(p);
+  } else {
     // View coordinates: the guest's world is rotated 180°.
     const v = me === 0 ? 1 : -1;
+    const cp = teamPlayers(me)[ctrl[me]];
+    const bx = ball.x * v, bz = ball.z * v;
+    // Lateral focus leans on your player, with a pull towards the ball.
+    clashX = clamp(cp.pos.x * v * 0.6 + bx * 0.4, -CLASH.follow, CLASH.follow);
+    const fx = clashX;
+    fitPts.push([fx - CLASH.nearHalf, 0, 10.8], [fx + CLASH.nearHalf, 0, 10.8]);
+    fitPts.push([fx - CLASH.farHalf, 0, -10], [fx + CLASH.farHalf, 0, -10], [fx, 2.6, -10]);
+    if ((phase === 'play' || phase === 'toss') && Math.abs(bz) < 11) {
+      fitPts.push([bx - 0.4, ball.y + 0.3, bz], [bx + 0.4, ball.y + 0.3, bz], [bx, 0, bz]);
+    }
     for (const p of teamPlayers(me)) {
       const x = p.pos.x * v, z = p.pos.z * v;
-      fitPts.push([x - 0.7, 0, z], [x + 0.7, 0, z], [x, 2.1, z]);
+      fitPts.push([x - 0.7, 0, z], [x + 0.7, 0, z], [x, 2.3, z]);
     }
   }
-  const r = fitCourt(camera.fov, mTop, mBot);
-  const s = Math.sin(PORTRAIT_PITCH), c = Math.cos(PORTRAIT_PITCH);
-  let d = r.d, lx = r.cx, lz = r.z, mid = r.mid;
-  if (mode !== 'menu') {
-    // In play: zoom in on the action and follow a point between the ball and your player.
-    const v = me === 0 ? 1 : -1;
-    const cp = teamPlayers(me)[ctrl[me]];
-    const focusX = ball.x * v * 0.6 + cp.pos.x * v * 0.4, focusZ = ball.z * v * 0.6 + cp.pos.z * v * 0.4;
-    d = r.d * PORTRAIT_ZOOM;
-    lx = clamp(focusX * 0.85, -3.5, 3.5);
-    lz = r.z + (focusZ - r.z) * 0.8;
-    mid = 0;
-    // Never show grass past either end: near baseline stays at/below the screen bottom, far glass at/above the HUD.
-    const th = Math.tan((camera.fov * Math.PI) / 360);
-    const lift = (mTop - mBot) / 2;
-    const solveTz = (dist, y, z, target) => {
-      let lo = -16, hi = 16;
-      for (let i = 0; i < 22; i++) {
-        const m = (lo + hi) / 2;
-        const vy = y - dist * s, vz = z - (m + dist * c);
-        if ((c * vy - s * vz) / ((-s * vy - c * vz) * th) < target) lo = m; else hi = m;
-      }
-      return (lo + hi) / 2;
-    };
-    const slack = (dist) => solveTz(dist, 3.2, -10, 1 + lift - mTop) - solveTz(dist, 0, 10.1, -1 + lift);
-    // Close enough that the court is at least as tall as the screen.
-    if (slack(d) > 0) {
-      let lo = d * 0.4, hi = d;
-      for (let i = 0; i < 18; i++) {
-        const m = (lo + hi) / 2;
-        if (slack(m) > 0) hi = m; else lo = m;
-      }
-      d = lo;
-    }
-    const tzNear = solveTz(d, 0, 10.1, -1 + lift);
-    const tzFar = solveTz(d, 3.2, -10, 1 + lift - mTop);
-    lz = clamp(lz, Math.min(tzFar, tzNear), tzNear);
-  }
-  _fitLook.set(lx, 0, lz);
-  _fitPos.set(lx, d * s, lz + d * c);
-  // Lens shift: keep the subject centred in the space below the HUD.
-  const shiftPx = (mid - (mBot - mTop) / 2) * h / 2;
-  portraitShift = lerp(portraitShift, shiftPx, 0.2);
+  const r = fitCourt(fov, portraitPitch, mTop, mBot);
+  const s = Math.sin(portraitPitch), c = Math.cos(portraitPitch);
+  _fitLook.set(r.cx, 0, r.z);
+  _fitPos.set(r.cx, r.d * s, r.z + r.d * c);
+  // Lens shift: centre the framed area in the space below the HUD (positive view offset moves the image up).
+  const shiftPx = -(r.mid - (mBot - mTop) / 2) * h / 2;
+  // Same easing rate as the camera position so framing and shift move together.
+  portraitShift = lerp(portraitShift, shiftPx, 0.05);
   camera.setViewOffset(window.innerWidth, h, 0, portraitShift, window.innerWidth, h);
 }
 let portraitShift = 0;
 
-// Closest camera distance (along the fixed pitch) that keeps every fit point on screen, centred vertically.
-function fitCourt(fov, mTop, mBot) {
-  const mSide = 0.012;
+// Closest camera distance (along the given pitch) that keeps every fit point on screen, centred vertically.
+function fitCourt(fov, pitch, mTop, mBot) {
   const th = Math.tan((fov * Math.PI) / 360), tw = th * camera.aspect;
-  const s = Math.sin(PORTRAIT_PITCH), c = Math.cos(PORTRAIT_PITCH);
+  const s = Math.sin(pitch), c = Math.cos(pitch);
   let minX = Infinity, maxX = -Infinity;
   for (const p of fitPts) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]); }
   const cx = (minX + maxX) / 2;
@@ -1952,30 +1930,33 @@ function fitCourt(fov, mTop, mBot) {
       const depth = -s * vy - c * vz;
       if (depth < 1) return false;
       const ny = (c * vy - s * vz) / (depth * th);
-      if (Math.abs(vx / (depth * tw)) > 1 - mSide || ny > 1 - mTop || ny < -1 + mBot) return false;
+      if (Math.abs(vx / (depth * tw)) > 1 || ny > 1 - mTop || ny < -1 + mBot) return false;
       lo = Math.min(lo, ny); hi = Math.max(hi, ny);
     }
     fitMid = (lo + hi) / 2;
+    fitSpan = hi - lo;
     return true;
   };
   let bestD = Infinity;
-  for (let tz = -8; tz <= 8; tz += 0.5) {
-    let lo = 2, hi = 120;
+  for (let tz = -10; tz <= 10; tz += 0.5) {
+    let lo = 2, hi = 160;
     if (!fits(tz, hi)) continue;
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 18; i++) {
       const mid = (lo + hi) / 2;
       if (fits(tz, mid)) hi = mid; else lo = mid;
     }
     bestD = Math.min(bestD, hi);
   }
   if (!isFinite(bestD)) bestD = 30;
-  const d = bestD * 1.01, band = (mBot - mTop) / 2;
-  let bestZ = 0, bestOff = Infinity, mid = 0;
-  for (let tz = -8; tz <= 8; tz += 0.1) {
+  // A little slack so a band of positions fits, then pick the one that centres the court.
+  const d = bestD * 1.03, band = (mBot - mTop) / 2;
+  let bestZ = 0, bestOff = Infinity, mid = 0, span = 0;
+  for (let tz = -10; tz <= 10; tz += 0.05) {
     if (!fits(tz, d)) continue;
     const off = Math.abs(fitMid - band);
-    if (off < bestOff) { bestOff = off; bestZ = tz; mid = fitMid; }
+    if (off < bestOff) { bestOff = off; bestZ = tz; mid = fitMid; span = fitSpan; }
   }
+  fitSpan = span;
   return { cx, d, z: bestZ, mid };
 }
 
@@ -2390,7 +2371,10 @@ async function joinOnline(raw) {
 }
 
 function inviteUrl() {
-  return `${location.origin}${location.pathname}?join=${net.code}`;
+  // Inside the iOS/Android app the page is served from capacitor://localhost, so share the public site instead.
+  const native = window.Capacitor?.isNativePlatform?.();
+  const base = native ? 'https://padel-royale.politecarrot.com/' : `${location.origin}${location.pathname}`;
+  return `${base}?join=${net.code}`;
 }
 
 async function shareInvite() {

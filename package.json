@@ -5,11 +5,20 @@
   "private": true,
   "scripts": {
     "start": "python3 tools/serve.py 8080",
-    "vendor": "cp node_modules/three/build/three.module.js node_modules/three/build/three.core.js vendor/"
+    "vendor": "cp node_modules/three/build/three.module.js node_modules/three/build/three.core.js vendor/",
+    "web:sync": "node sync-web.js",
+    "sync": "node sync-web.js && cap sync"
   },
   "keywords": [],
   "type": "module",
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
     "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
   }
 }

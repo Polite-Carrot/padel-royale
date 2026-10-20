@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 
 // Procedural padel player: FK legs/spine, 2-bone IK arms, keyframed strokes whose
 // contact key is the predicted ball position, so racket and ball meet exactly.

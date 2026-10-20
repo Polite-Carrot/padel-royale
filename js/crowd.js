@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 
 // Mii-style fans in the stands: instanced bodies, heads, hair, eyes and hands that jump and spin on big moments.
 const SKIN = [0xf3d2b3, 0xe0b48f, 0xc68a5e, 0x8d5a3b, 0x5e3a24, 0xf6dcc4];
