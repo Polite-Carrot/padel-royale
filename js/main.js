@@ -3,13 +3,19 @@ import { BALL_R, COURT, DOOR, makeBall, cloneBall, stepBall, solveShot } from '.
 import { Character, LOOKS, STROKE_TIMING, strokeLead } from './character.js';
 import { Sfx } from './audio.js';
 import * as Store from './store.js';
+import { CATALOG, BRANDS, SHAPES, ATTRS, LEVEL_STATS, racketById, racketStats, drawRacketCard } from './rackets.js';
 import { Link, CODE_LEN, normalizeCode } from './net.js';
 import { Crowd } from './crowd.js';
+import { Club } from './club.js';
 
 // Real padel physics, played back slightly slower than real time.
 const GAME_SPEED = 0.8;
 const DT = 1 / 240;
-const PLAYER_SPEED = 5.2;
+const PLAYER_SPEED = 4.7;
+// Running backwards (away from the net) is slower, so a good lob really has to be chased.
+const BACKPEDAL = 0.74;
+// Balls just out of reach can still be scrambled with a lunging dive, at the cost of a weak shot.
+const STRETCH = 1.35;
 const IDEAL_D = 0.62;
 const MAX_HIT_Y = 3.1;
 const CONTACT_HORIZON = 0.62;
@@ -17,8 +23,8 @@ const KIND_ERR = { drive: 1, volley: 0.85, lob: 0.9, drop: 1.15, bandeja: 0.9, s
 
 const DIFF = {
   easy: { label: 'Easy', reaction: 0.38, speed: 0.74, err: 1.7, reach: 1.0, miss: 0.12, netRate: 0.2, smart: 0.3, power: 0.85, reward: 120 },
-  medium: { label: 'Medium', reaction: 0.24, speed: 0.88, err: 1.1, reach: 1.1, miss: 0.05, netRate: 0.45, smart: 0.65, power: 0.95, reward: 250 },
-  hard: { label: 'Hard', reaction: 0.13, speed: 1.0, err: 0.7, reach: 1.2, miss: 0.02, netRate: 0.7, smart: 0.95, power: 1.05, reward: 500 },
+  medium: { label: 'Medium', reaction: 0.22, speed: 0.9, err: 1.0, reach: 1.1, miss: 0.045, netRate: 0.45, smart: 0.7, power: 0.95, reward: 250 },
+  hard: { label: 'Hard', reaction: 0.12, speed: 1.0, err: 0.65, reach: 1.2, miss: 0.018, netRate: 0.7, smart: 0.97, power: 1.05, reward: 500 },
 };
 
 const FORMATS = {
@@ -43,7 +49,7 @@ const AUTOPILOT = new URLSearchParams(location.search).has('autopilot');
 // Online play: the host runs the whole simulation; the guest drives team 1 and renders snapshots.
 const net = {
   role: null, link: null, code: '',
-  remoteAxis: { x: 0, y: 0 }, remoteAuto: false, guestColor: null,
+  remoteAxis: { x: 0, y: 0 }, guestRacket: null, aimQ: 1,
   snaps: [], queue: [], renderT: null, lastSnap: 0, lastIn: { x: 0, y: 0, t: 0 },
   lastRecv: 0, lastSent: 0, marks: { b: null, i: null }, rematch: { me: false, them: false },
 };
@@ -180,19 +186,8 @@ function plane(w, h, mat, x, y, z, rotY = 0) {
 function buildCourt() {
   const W = COURT.halfW, L = COURT.halfL;
   const before = new Set(scene.children);
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(160, 160), new THREE.MeshStandardMaterial({ color: 0x66b85a, roughness: 1 }));
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.02;
-  ground.receiveShadow = true;
-  scene.add(ground);
 
-  const apron = new THREE.Mesh(new THREE.PlaneGeometry(19, 26), new THREE.MeshStandardMaterial({ color: 0x2fa866, roughness: 1 }));
-  apron.rotation.x = -Math.PI / 2;
-  apron.position.y = -0.01;
-  apron.receiveShadow = true;
-  scene.add(apron);
-
-  const turf = new THREE.Mesh(new THREE.PlaneGeometry(2 * W, 2 * L), new THREE.MeshStandardMaterial({ map: turfTex, roughness: 0.95 }));
+  const turf = new THREE.Mesh(new THREE.PlaneGeometry(2 * W, 2 * L), new THREE.MeshLambertMaterial({ map: turfTex }));
   turf.rotation.x = -Math.PI / 2;
   turf.receiveShadow = true;
   scene.add(turf);
@@ -209,9 +204,10 @@ function buildCourt() {
   line(0, 0, 0.05, 2 * (COURT.serviceZ + 0.2));
 
   // Tempered glass: a light tint plus bright edges so each 2 m panel reads clearly.
+  // Flat planes: one pass is enough (three.js would otherwise draw transparent double-sided twice per frame).
   const glassMat = (faint) => new THREE.MeshStandardMaterial({
     color: 0xd9f1ff, transparent: true, opacity: faint ? 0.06 : 0.2, roughness: 0.05, metalness: 0.1,
-    side: THREE.DoubleSide, depthWrite: false,
+    side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true,
   });
   const edgeMat = (faint) => new THREE.MeshBasicMaterial({ color: 0xeaf8ff, transparent: true, opacity: faint ? 0.15 : 0.75, depthWrite: false });
   const glassSolid = glassMat(false), glassFaint = glassMat(true);
@@ -243,8 +239,8 @@ function buildCourt() {
   // Camera-side panels are faint so they don't block the view of your own half.
   // One shared material; each panel scales its UVs so the diamond mesh stays 35 cm.
   const fenceMk = (faint) => new THREE.MeshBasicMaterial({
-    map: fenceTex, transparent: true, opacity: faint ? 0.18 : 1, alphaTest: faint ? 0.05 : 0.4,
-    side: THREE.DoubleSide, depthWrite: !faint,
+    map: fenceTex, transparent: faint, opacity: faint ? 0.18 : 1, alphaTest: faint ? 0.05 : 0.4,
+    side: THREE.DoubleSide, depthWrite: !faint, forceSinglePass: true,
   });
   const fenceSolid = fenceMk(false), fenceFaint = fenceMk(true);
   const fenceMesh = (w, h, x, y, z, rotY = 0) => {
@@ -314,7 +310,7 @@ function buildCourt() {
   // Net: dark netting, white tape on top, white band at the bottom, posts at each side.
   const netMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(2 * W, COURT.netH - 0.02),
-    new THREE.MeshBasicMaterial({ map: netTex, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
+    new THREE.MeshBasicMaterial({ map: netTex, transparent: true, side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true }),
   );
   netMesh.position.set(0, (COURT.netH + 0.02) / 2, 0);
   scene.add(netMesh);
@@ -354,8 +350,9 @@ function buildCourt() {
     scene.add(lamp);
   }
   const standColors = [0xff7a1a, 0xffc23d, 0x2ec4b6, 0x6b5bff];
+  const standMats = standColors.map((color) => new THREE.MeshLambertMaterial({ color }));
   for (const sx of [-1, 1]) for (let i = 0; i < 4; i++) {
-    const s = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5 + i * 0.5, 22), new THREE.MeshStandardMaterial({ color: standColors[i], roughness: 0.8 }));
+    const s = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5 + i * 0.5, 22), standMats[i]);
     s.position.set(sx * (10.5 + i * 1.2), (0.5 + i * 0.5) / 2, 0);
     s.receiveShadow = true;
     scene.add(s);
@@ -381,7 +378,12 @@ function mergeStatic(meshes) {
   const out = [];
   const nm = new THREE.Matrix3(), v = new THREE.Vector3();
   for (const list of groups.values()) {
-    if (list.length < 2) { out.push(list[0]); continue; }
+    if (list.length < 2) {
+      list[0].updateMatrix();
+      list[0].matrixAutoUpdate = false;
+      out.push(list[0]);
+      continue;
+    }
     let vc = 0, ic = 0;
     for (const m of list) {
       const g = m.geometry;
@@ -413,6 +415,7 @@ function mergeStatic(meshes) {
     merged.castShadow = list[0].castShadow;
     merged.receiveShadow = list[0].receiveShadow;
     merged.userData.swap = list[0].userData.swap;
+    merged.matrixAutoUpdate = false;
     scene.add(merged);
     out.push(merged);
   }
@@ -420,6 +423,7 @@ function mergeStatic(meshes) {
 }
 const viewSwap = [];
 buildCourt();
+const club = new Club(scene, { shadows: SHADOWS });
 
 // The guest watches from the far end: spin the world and fade the fences nearest their camera.
 function setViewSide(team) {
@@ -458,6 +462,30 @@ ctrlArrow.rotation.x = Math.PI;
 scene.add(ctrlArrow);
 const moveMarker = flatMesh(new THREE.RingGeometry(0.16, 0.26, 28), 0xffffff, 0.9);
 moveMarker.visible = false;
+// Tennis Clash style aim circle on the opponent's court: the area your shot can land in.
+// A thin white edge with a faint fill; better racket control draws (and plays) a smaller circle.
+const AIM_MAX = 2.6;
+const aimMat = new THREE.ShaderMaterial({
+  uniforms: { radius: { value: 0.6 } },
+  vertexShader: 'varying vec2 vP; void main() { vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform float radius; varying vec2 vP;
+    void main() {
+      float d = length(vP), px = fwidth(d);
+      float w = max(0.045, px * 3.0);
+      float edge = 1.0 - smoothstep(0.0, px * 1.2, abs(d - radius + w * 0.5) - w * 0.5);
+      float fill = (1.0 - smoothstep(radius - px, radius, d)) * 0.13;
+      float a = max(edge * 0.95, fill);
+      if (a < 0.004) discard;
+      gl_FragColor = vec4(1.0, 1.0, 1.0, a);
+    }`,
+  transparent: true,
+  depthWrite: false,
+});
+const aimRing = new THREE.Mesh(new THREE.PlaneGeometry(AIM_MAX * 2, AIM_MAX * 2), aimMat);
+aimRing.rotation.x = -Math.PI / 2;
+aimRing.visible = false;
+scene.add(aimRing);
+let aimLock = null;
 
 // ---------------------------------------------------------------- crowd
 const crowdRows = [];
@@ -467,7 +495,6 @@ const crowd = new Crowd(scene, crowdRows);
 // ---------------------------------------------------------------- players
 function makePlayer(team, idx) {
   const ch = new Character(LOOKS[team * 2 + idx]);
-  if (team === 1) ch.setRacketColor(idx === 0 ? 0x2b2b33 : 0xd03050);
   ch.yaw = baseYaw(team);
   scene.add(ch.root);
   return {
@@ -481,7 +508,9 @@ function makePlayer(team, idx) {
 }
 
 const players = [makePlayer(0, 0), makePlayer(0, 1), makePlayer(1, 0), makePlayer(1, 1)];
-const teamPlayers = (t) => [players[t * 2], players[t * 2 + 1]];
+// Shared, read-only pairs: this is called many times per physics step.
+const TEAMS = [[players[0], players[1]], [players[2], players[3]]];
+const teamPlayers = (t) => TEAMS[t];
 
 // Host forwards every animation cue so the guest's characters move identically.
 players.forEach((p, i) => {
@@ -489,20 +518,28 @@ players.forEach((p, i) => {
   const { startSwing, cancelSwing, splitStep, grunt } = ch;
   ch.startSwing = (anim, side, c, now, ct, opts = {}) => {
     startSwing.call(ch, anim, side, c, now, ct, opts);
-    hostSend({ t: 'sw', i, anim, side, c: [c.x, c.y, c.z], ct, j: opts.jump || 0, sp: opts.spin || 0 });
+    hostSend({ t: 'sw', i, anim, side, c: [c.x, c.y, c.z], ct, j: opts.jump || 0, sp: opts.spin || 0, dv: !!opts.dive });
   };
   ch.cancelSwing = () => { cancelSwing.call(ch); hostSend({ t: 'cs', i }); };
   ch.splitStep = () => { splitStep.call(ch); hostSend({ t: 'ss', i }); };
   ch.grunt = (v) => { grunt.call(ch, v); hostSend({ t: 'gr', i, v }); };
 });
 
-const myRacketColor = () => Store.racketTier(save.upgrades).color;
-function setRackets(c0, c1 = null) {
-  for (const p of teamPlayers(0)) p.ch.setRacketColor(c0);
-  for (const p of teamPlayers(1)) p.ch.setRacketColor(c1 ?? (p.idx === 0 ? 0x2b2b33 : 0xd03050));
+// Your pair plays your equipped racket; the CPU pair carries models that match its level.
+const CPU_TIERS = { easy: [0, 1], medium: [1, 2, 3], hard: [3, 4] };
+function pickCpuRackets() {
+  const pool = CATALOG.filter((r) => CPU_TIERS[diffKey].includes(r.tier));
+  return [0, 1].map(() => pool[Math.floor(Math.random() * pool.length)].id);
+}
+let cpuRackets = pickCpuRackets();
+// Each team takes one racket id or a pair of ids; unknown ids (e.g. from an online peer) fall back to the starter.
+function setRackets(team0, team1) {
+  const pick = (ids, i) => racketById(String(Array.isArray(ids) ? ids[i] : ids));
+  teamPlayers(0).forEach((p, i) => p.ch.setRacket(pick(team0, i)));
+  teamPlayers(1).forEach((p, i) => p.ch.setRacket(pick(team1, i)));
 }
 function applyRacketLook() {
-  setRackets(myRacketColor());
+  setRackets(save.rackets.equipped, cpuRackets);
 }
 
 // ---------------------------------------------------------------- audio
@@ -567,7 +604,14 @@ function actionFor(team, act, intent = null) {
     startToss();
     return;
   }
-  hitBuffer[team] = { type: act, t: 0.6, intent };
+  // A swing that's already under way just takes the new aim. Otherwise the shot is held until your pair
+  // next hits (or the point ends), however long the ball takes coming off the glass.
+  const swinging = teamPlayers(team).find((p) => p.pending);
+  if (swinging) {
+    if (intent) swinging.pending.intent = intent;
+    return;
+  }
+  hitBuffer[team] = { type: act, intent };
 }
 
 // Tap-to-move: the nearer of your two players takes over and runs to the spot.
@@ -663,7 +707,7 @@ function localTap(cx, cy) {
 gestureZone.addEventListener('pointerdown', (e) => {
   if (mode !== 'playing' || netPaused || gesture) return;
   e.preventDefault();
-  gestureZone.setPointerCapture(e.pointerId);
+  try { gestureZone.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
   const t = performance.now();
   gesture = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: t, pts: [[e.clientX, e.clientY, t]] };
   trail = { pts: gesture.pts, fade: 1, kind: null };
@@ -687,6 +731,7 @@ const endGesture = (e) => {
     return;
   }
   trail.kind = it.k === 'lob' ? 'lob' : it.k === 'drop' ? 'drop' : it.speed >= SWIPE.smashV ? 'fast' : 'hit';
+  aimLock = { it };
   localSwipe(it);
   haptic(10);
 };
@@ -694,15 +739,20 @@ gestureZone.addEventListener('pointerup', endGesture);
 gestureZone.addEventListener('pointercancel', endGesture);
 
 const TRAIL_COLORS = { lob: '120,220,255', drop: '200,255,120', fast: '255,90,60', hit: '255,200,80' };
+let trailDrawn = false;
 function drawSwipeTrail(dt) {
   const w = window.innerWidth, h = window.innerHeight;
   if (swipeFx.width !== w || swipeFx.height !== h) { swipeFx.width = w; swipeFx.height = h; }
+  // Leave an empty canvas untouched, so the browser doesn't recomposite a full-screen layer every frame.
+  if (!trail && !trailDrawn) return;
   swipeCtx.clearRect(0, 0, w, h);
+  trailDrawn = false;
   if (!trail) return;
   if (!gesture) trail.fade -= dt * 3.5;
   if (trail.fade <= 0) { trail = null; return; }
   const p = trail.pts;
   if (p.length < 2) return;
+  trailDrawn = true;
   swipeCtx.lineCap = swipeCtx.lineJoin = 'round';
   const col = TRAIL_COLORS[trail.kind] || '255,255,255';
   for (let i = 1; i < p.length; i++) {
@@ -732,7 +782,7 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && ['Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract', 'Digit0', 'Numpad0'].includes(e.code)) e.preventDefault();
 });
 // Copying and selecting are blocked everywhere; pasting (e.g. a join code) still works.
-for (const ev of ['copy', 'cut', 'dragstart']) document.addEventListener(ev, (e) => e.preventDefault());
+for (const ev of ['copy', 'cut', 'dragstart']) document.addEventListener(ev, (e) => { if (!allowCopy) e.preventDefault(); });
 document.addEventListener('selectstart', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
 
 // ---------------------------------------------------------------- game state
@@ -907,7 +957,7 @@ function findContact(p, horizon) {
   const b = cloneBall(ball);
   let valid = rally.valid, outPlay = rally.outPlay;
   const ev = [];
-  let t = 0, prevD = Infinity;
+  let t = 0, prevD = Infinity, stretch = null;
   while (t < horizon) {
     ev.length = 0;
     stepBall(b, DT, ev);
@@ -933,13 +983,17 @@ function findContact(p, horizon) {
     if (!valid && Math.abs(p.pos.z) > 5.5 && b.y < 1.9) continue;
     const k = Math.min(t, 0.2);
     const d = Math.hypot(b.x - (p.pos.x + p.vel.x * k), b.z - (p.pos.z + p.vel.z * k));
+    // Dive only as a last resort: the ball is about to pass and no normal contact is coming.
+    if (t <= 0.16 && d > p.reach * 1.05 && d <= p.reach * STRETCH && b.y > 0.2 && b.y < 2.3 && (!stretch || d < stretch.d)) {
+      stretch = { t, x: b.x, y: b.y, z: b.z, bounced: valid, d, stretch: true, spd: Math.hypot(b.vx, b.vy, b.vz) };
+    }
     if (d > p.reach || (b.y < 0.3 && b.vy > 0) || (b.y > 1.7 && b.vy > 3.5)) { prevD = d; continue; }
     if (d <= IDEAL_D + 0.08 || d > prevD || (b.y > 1.9 && d < p.reach * 0.85)) {
-      return { t, x: b.x, y: b.y, z: b.z, bounced: valid, d };
+      return { t, x: b.x, y: b.y, z: b.z, bounced: valid, d, spd: Math.hypot(b.vx, b.vy, b.vz) };
     }
     prevD = d;
   }
-  return null;
+  return stretch;
 }
 
 function strokeFor(kind, p, c) {
@@ -948,6 +1002,8 @@ function strokeFor(kind, p, c) {
   // From outside: low balls near the access go back through it, everything else is lobbed over the fence.
   if (Math.abs(c.x) > COURT.halfW || Math.abs(p.pos.x) > COURT.halfW) kind = Math.abs(c.z) < 2.2 && c.y < 1.4 ? 'drive' : 'lob';
   if (kind === 'pop' && c.y < 2.1) kind = 'smash';
+  // Pushed back by a good lob you can't attack it: overheads from deep are defensive bandejas.
+  if ((kind === 'smash' || kind === 'pop') && Math.abs(p.pos.z) > 7) kind = 'bandeja';
   if (kind === 'smash' && c.y < 1.6) kind = 'drop';
   if (kind === 'drive' && c.y > 1.85) kind = 'bandeja';
   if (kind === 'drive' && !c.bounced && Math.abs(p.pos.z) < 5) kind = 'volley';
@@ -998,6 +1054,8 @@ function tryCommit(p, type, intent = null) {
   if (type === 'ai') kind = aiChooseKind(p, c);
   else if (type === 'swipe') kind = swipeKind(intent, p, c);
   else if (type === 'smash') kind = c.y >= 2.25 && Math.abs(p.pos.z) < 5 ? 'pop' : 'smash';
+  // A diving scramble can only push the ball back up: a defensive lob, or a blocked drive off a high ball.
+  if (c.stretch) kind = c.y > 1.7 ? 'drive' : 'lob';
   const s = strokeFor(kind, p, c);
   const lead = strokeLead(s.anim);
   if (c.t > lead + DT * 0.5) return false;
@@ -1006,14 +1064,21 @@ function tryCommit(p, type, intent = null) {
   const retry = p.missFor === rally.hitId;
   const whiff = type === 'ai' && Math.random() < D.miss * (1 + incoming / 25) * (retry ? 0.25 : 1);
   if (whiff) p.missFor = rally.hitId;
-  p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed: clamp((lead - c.t) / lead, 0, 1), whiff, whooshed: false, intent };
+  const rushed = clamp((lead - c.t) / lead, 0, 1);
+  // The strike quality is fixed as the swing starts, so the aim circle can show exactly how wild the shot can be.
+  const q = qualityAt(p, s.kind, c.d, c.y, c.spd, (0.5 * Math.hypot(p.vel.x, p.vel.z)) / p.speedMax,
+    Math.max(0, p.vel.z * sideZ(p.team)) / p.speedMax, rushed, !!c.stretch);
+  p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed, whiff, whooshed: false, intent, stretch: !!c.stretch, q };
   let jump = 0, spin = 0;
-  if (s.anim === 'smash' || s.anim === 'pop') {
+  if (c.stretch) {
+    // Desperate lunge: a low flying leap towards the ball.
+    jump = 0.22 + clamp((c.d - p.reach) / p.reach, 0, 0.4) * 0.5;
+  } else if (s.anim === 'smash' || s.anim === 'pop') {
     // Anime leap: smashes always get airborne, por tres adds a full spin.
     jump = Math.max(clamp(c.y - 2.3, 0, 0.8), s.anim === 'pop' ? 0.55 : 0.35);
     spin = s.anim === 'pop' ? 1 : 0;
   } else if (s.anim === 'bandeja') jump = clamp(c.y - 2.5, 0, 0.2);
-  p.ch.startSwing(s.anim, s.side, _contact.set(c.x, c.y, c.z), simTime, p.pending.time, { pos: p.pos, jump, spin });
+  p.ch.startSwing(s.anim, s.side, _contact.set(c.x, c.y, c.z), simTime, p.pending.time, { pos: p.pos, jump, spin, dive: !!c.stretch });
   return true;
 }
 
@@ -1022,7 +1087,7 @@ function resolveContact(p, pd) {
   const legal = phase === 'play' && rally && p.team !== rally.lastHit && mySide &&
     !(rally.serve && !rally.valid) && (!ball.outside || rally.outPlay);
   const d = Math.hypot(ball.x - p.pos.x, ball.z - p.pos.z);
-  if (!legal || d > p.reach * 1.2 || pd.whiff) {
+  if (!legal || d > p.reach * (pd.stretch ? STRETCH * 1.08 : 1.2) || pd.whiff) {
     p.cooldown = 0.25;
     return;
   }
@@ -1059,13 +1124,9 @@ function updateSwings() {
   }
   const ci = ctrl[R];
   const buf = hitBuffer[R];
-  const auto = R === 0 ? save.settings.autoSwing : net.remoteAuto;
+  if (!buf) return;
   for (const p of [team[ci], team[1 - ci]]) {
-    let type;
-    if (buf) type = buf.type;
-    else if (p === team[ci] && auto) type = 'drive';
-    else continue;
-    if (tryCommit(p, type, buf ? buf.intent : null)) {
+    if (tryCommit(p, buf.type, buf.intent)) {
       hitBuffer[R] = null;
       ctrl[R] = p.idx;
       return;
@@ -1073,74 +1134,98 @@ function updateSwings() {
   }
 }
 
-function shotQuality(p, kind, pd) {
+// 0..1: how cleanly the ball is met. Drives shot pace, AI error, and the size of the human aim circle.
+function qualityAt(p, kind, d, y, incoming, moving, retreat, rushed, stretch) {
   const overhead = kind === 'smash' || kind === 'pop' || kind === 'bandeja';
-  const d = Math.hypot(ball.x - p.pos.x, ball.z - p.pos.z);
-  const incoming = Math.hypot(ball.vx, ball.vy, ball.vz);
   let q = 1;
   q -= clamp(Math.abs(d - (overhead ? 0.4 : IDEAL_D)) / Math.max(0.35, p.reach - 0.25), 0, 1) * 0.45;
-  q -= pd.rushed * 0.45;
-  q -= clamp(Math.hypot(p.vel.x, p.vel.z) / p.speedMax, 0, 1) * 0.18;
-  if (ball.y < 0.3) q -= 0.15;
-  if (ball.y > 1.9 && !overhead) q -= 0.2;
-  q -= clamp((incoming - 16) / 24, 0, 0.25);
+  q -= rushed * 0.45;
+  q -= clamp(moving, 0, 1) * 0.18;
+  if (y < 0.3) q -= 0.15;
+  if (y > 1.9 && !overhead) q -= 0.2;
+  q -= clamp((incoming - 13) / 20, 0, 0.3);
+  // A smash coming back at you is hard to control, whatever the bounce does.
+  if (rally && (rally.lastKind === 'smash' || rally.lastKind === 'pop')) q -= 0.22;
+  if (overhead) {
+    // Retreating overheads (chasing a lob back) are hard to control.
+    q -= clamp(retreat, 0, 1) * 0.25;
+    if (Math.abs(p.pos.z) > 6.5) q -= 0.15;
+  }
+  // Diving scrambles are pure survival shots.
+  if (stretch) q -= 0.45;
   return clamp(q, 0.05, 1);
+}
+
+function shotQuality(p, kind, pd) {
+  return qualityAt(p, kind, Math.hypot(ball.x - p.pos.x, ball.z - p.pos.z), ball.y, Math.hypot(ball.vx, ball.vy, ball.vz),
+    Math.hypot(p.vel.x, p.vel.z) / p.speedMax, Math.max(0, p.vel.z * sideZ(p.team)) / p.speedMax, pd.rushed, pd.stretch);
 }
 
 function performShot(p, kind, tx, depthAdj, pd, mods = {}) {
   const team = p.team, dir = -sideZ(team), st = p.stats;
-  const q = shotQuality(p, kind, pd);
+  // Human shots carry their aim (the circle's centre) and land somewhere inside the circle shown for them.
+  const aim = mods.aim || null;
+  const q = aim && pd.q != null ? pd.q : shotQuality(p, kind, pd);
   const fromOutside = Math.abs(ball.x) > COURT.halfW;
 
   const from = { x: ball.x, y: ball.y, z: ball.z };
   let depth = 7.2, vh = 17, T = 0, top = 150, clear = 0.4;
   switch (kind) {
     case 'drive':
-      if (fromOutside) { depth = 6.5; vh = 13; top = 60; clear = 0.3; tx = clamp(tx, -3, 3); }
+      if (fromOutside) { depth = 6.5; vh = 13; top = 60; clear = 0.3; if (!aim) tx = clamp(tx, -3, 3); }
       break;
     case 'volley': depth = 6.8; vh = 14; top = -40; clear = 0.22; break;
     case 'bandeja': depth = 7.6; vh = 14; top = -90; clear = 0.45; break;
     case 'smash': depth = 6.0; vh = 25; top = 40; clear = 0.12; break;
     case 'pop':
-      // Por tres: steep and flat into the side of the box so it kicks off the back glass and out.
+      // Por tres: steep and flat. The CPU aims it into the side of the box so it kicks off the back glass and out.
       depth = 4.6; vh = 34; top = 0; clear = 0.1;
-      tx = (Math.sign(tx) || (Math.random() < 0.5 ? -1 : 1)) * clamp(Math.abs(tx), 2.4, 3.0);
-      depthAdj = clamp(depthAdj, -0.8, 0.8);
+      if (!aim) {
+        tx = (Math.sign(tx) || (Math.random() < 0.5 ? -1 : 1)) * clamp(Math.abs(tx), 2.4, 3.0);
+        depthAdj = clamp(depthAdj, -0.8, 0.8);
+      }
       break;
     case 'lob': {
-      // A mistimed lob lands short and low: a gift for the net player to smash.
+      // A good lob goes high and deep over the net players; a mistimed one lands short and low for a smash.
       const bad = 1 - q;
-      depth = 8.5 - bad * (1.5 + Math.random() * 3.5);
-      T = (2.0 + (Math.abs(from.z) > 7 ? 0.25 : 0)) * (1 - bad * 0.35);
+      depth = 9.0 - bad * (1.5 + Math.random() * 3.5);
+      T = (2.3 + (Math.abs(from.z) > 7 ? 0.25 : 0)) * (1 - bad * 0.35);
       top = 70;
-      clear = 0.8 + q * 1.2;
+      clear = 1.0 + q * 1.5;
       if (fromOutside) {
         depth = 7.2 - bad * 2.5;
         T = 2.4 * (1 - bad * 0.2);
-        tx = clamp(tx, -2.5, 2.5);
+        if (!aim) tx = clamp(tx, -2.5, 2.5);
       }
       break;
     }
     case 'drop': depth = 2.4; vh = 8.5; top = -130; clear = 0.15; break;
   }
-  // Swipe shots: length/speed choose depth, pace and lob height (a mistimed lob still drops short).
+  // Swipe shots: length/speed choose depth, pace and lob height. A mistimed human lob flies lower, not elsewhere.
   if (kind === 'lob' && mods.lobT) {
     const bad = 1 - q;
     T = mods.lobT * (1 - bad * 0.3);
     clear = mods.lobClear * (0.6 + 0.4 * q);
-    depth = mods.depth - bad * (1 + Math.random() * 2.5);
-  } else if (mods.depth != null && kind !== 'pop') depth = mods.depth;
+    depth = mods.depth;
+  } else if (mods.depth != null && (kind !== 'pop' || aim)) depth = mods.depth;
   if (mods.vhMul) vh *= mods.vhMul;
   depth = clamp(depth + depthAdj, 2.0, 9.2);
   tx = clamp(tx, -4.5, 4.5);
   vh *= st.power * (0.75 + 0.25 * q);
-  const tz = dir * depth;
+  let tz = dir * depth;
+  if (aim) {
+    // Kept 12 cm inside the edge: a very fast ball's bounce point can't be placed finer than one physics step.
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.max(0, aimRadius(st.err, aim, q) - 0.12) * Math.sqrt(Math.random());
+    tx += Math.cos(a) * r;
+    tz += Math.sin(a) * r;
+  }
   const dist = Math.hypot(tx - from.x, tz - from.z);
   const ux = (tx - from.x) / dist, uz = (tz - from.z) / dist;
   const s = top * (top > 0 ? st.spin : Math.sqrt(st.spin));
   const spin = { x: s * uz, y: 0, z: -s * ux };
   const v = solveShot(from, { x: tx, z: tz }, T || dist / vh, spin, clear);
-  applyError(v, st.err * (0.35 + 2.4 * Math.pow(1 - q, 1.3)) * (KIND_ERR[kind] || 1) * (0.7 + vh / 40));
+  if (!aim) applyError(v, st.err * (0.35 + 2.4 * Math.pow(1 - q, 1.3)) * (KIND_ERR[kind] || 1) * (0.7 + vh / 40));
   launch(v, spin);
   finishHit(p, kind, Math.hypot(v.x, v.y, v.z));
 }
@@ -1169,30 +1254,102 @@ function finishHit(p, kind, speed) {
 }
 
 const ramp = (lo, hi, v) => clamp((v - lo) / (hi - lo), 0, 1);
-function humanShot(p, pd) {
-  const it = pd.intent;
+
+// Where a human shot is aimed before execution error — shared by the aim circle and the shot itself.
+function shotTarget(team, it, axis = null, kind = 'drive') {
+  const vs = rightX(team);
   if (it) {
-    const vs = rightX(p.team);
-    let tx = it.ax * 4.2 * vs;
-    let mods;
-    if (pd.kind === 'lob' && it.k === 'lob') {
+    if (it.k === 'lob') {
       // Longer swipe = higher lob; faster swipe = deeper lob.
       const hgt = ramp(0.07, 0.42, it.len);
-      mods = { lobT: 1.5 + 1.3 * hgt, lobClear: 0.6 + 2.2 * hgt, depth: 5.6 + 3.4 * ramp(0.4, 2.6, it.speed) };
-    } else if (pd.kind === 'drop') {
-      tx = it.ax * 2.8 * vs;
-      mods = { depth: 1.8 + 1.4 * ramp(SWIPE.tap, SWIPE.drop, it.len) };
-    } else {
-      // Faster swipe = faster ball; longer swipe = deeper ball.
-      mods = { vhMul: 0.7 + 0.6 * ramp(0.6, 3.6, it.speed), depth: 4.2 + 4.8 * ramp(0.08, 0.42, it.len) };
+      return { kind: 'lob', x: it.ax * 4.2 * vs, depth: 6.4 + 2.8 * ramp(0.4, 2.6, it.speed), lobT: 1.75 + 1.35 * hgt, lobClear: 0.9 + 2.4 * hgt };
     }
-    performShot(p, pd.kind, tx, 0, pd, mods);
-    return;
+    if (it.k === 'drop') return { kind: 'drop', x: it.ax * 2.8 * vs, depth: 1.8 + 1.4 * ramp(SWIPE.tap, SWIPE.drop, it.len) };
+    // Faster swipe = faster ball; longer swipe = deeper ball.
+    return {
+      kind: it.speed >= SWIPE.smashV ? 'fast' : 'hit', x: it.ax * 4.2 * vs,
+      depth: 4.2 + 4.8 * ramp(0.08, 0.42, it.len), vhMul: 0.7 + 0.6 * ramp(0.6, 3.6, it.speed), speed: it.speed,
+    };
   }
-  const a = axisFor(p.team);
-  const tx = Math.abs(a.x) > 0.2 ? a.x * 3.6 : -ball.x * 0.6;
-  const depthAdj = a.y > 0.2 ? a.y * 1.3 : a.y < -0.2 ? a.y * 2.8 : 0;
-  performShot(p, pd.kind, tx, depthAdj, pd);
+  const a = axis || axisFor(team);
+  const x = Math.abs(a.x) > 0.2 ? a.x * 3.6 : -ball.x * 0.6;
+  const base = kind === 'lob' ? 9.0 : kind === 'drop' ? 2.4 : 7.2;
+  return { kind: kind === 'lob' || kind === 'drop' ? kind : 'hit', x, depth: base + (a.y > 0.2 ? a.y * 1.3 : a.y < -0.2 ? a.y * 2.8 : 0) };
+}
+
+// Aim circle radius in metres: racket control (err) sets the base size, harder swipes and lobs widen it, drops
+// tighten it, and a ball that's hard to strike cleanly (rushed, stretched, a smash coming at you) can more than double it.
+const AIM_R = 0.62;
+const spreadOf = (q) => 1 + 2 * Math.max(0, 0.9 - q);
+function aimRadius(err, tg, q = 1) {
+  const f = tg.kind === 'lob' ? 1.25 : tg.kind === 'drop' ? 0.75 : 1 + 0.5 * ramp(0.6, 3.6, tg.speed || 0);
+  return clamp(AIM_R * err * f * spreadOf(q), 0.22, 2.4);
+}
+// Online everyone plays level rackets, so the local aim uses the level stats there.
+const myShotErr = () => (net.role ? LEVEL_STATS.err : teamPlayers(0)[0].stats?.err ?? LEVEL_STATS.err);
+
+// How cleanly a pair will strike the incoming ball: exact once a swing is under way, estimated from the
+// planned intercept before that (pace, height, a smash return), and poor if nobody can get there.
+function aimQuality(team) {
+  if (!rally) return 1;
+  const tps = teamPlayers(team);
+  for (const p of tps) if (p.pending) return p.pending.q;
+  const p = tps.find((pl) => pl.plan);
+  if (!p) return 0.45;
+  const pl = p.plan;
+  return qualityAt(p, pl.y > 1.9 ? 'smash' : 'drive', IDEAL_D, pl.y, pl.spd || 0, 0, 0, 0, false);
+}
+
+// Live while you swipe, locked once you release, and driven by the arrows on desktop.
+// A locked aim lasts until your pair hits the ball or the point ends, like the held swipe itself.
+const aimSeen = { lh: -1, ph: 'idle' };
+const DEAD_PHASES = ['idle', 'preServe', 'pointOver', 'serveReset'];
+function updateAim() {
+  const me = myTeam();
+  const lh = rally ? rally.lastHit : -1;
+  if ((lh === me && aimSeen.lh !== me) || (phase !== aimSeen.ph && DEAD_PHASES.includes(phase))) aimLock = null;
+  aimSeen.lh = lh;
+  aimSeen.ph = phase;
+  const incoming = mode === 'playing' && !netPaused && phase === 'play' && rally && rally.lastHit !== me;
+  // A swing that's under way shows exactly where it's going (the guest's swings live on the host).
+  const swing = net.role === 'guest' ? null : teamPlayers(me).find((p) => p.pending)?.pending;
+  let it = null, show = false;
+  if (incoming) {
+    if (gesture) {
+      const last = gesture.pts[gesture.pts.length - 1];
+      const live = classifySwipe(gesture, last[0], last[1], performance.now());
+      if (!live.tap) { it = live; show = true; }
+    } else if (swing && swing.intent) {
+      it = swing.intent;
+      show = true;
+    } else if (aimLock) {
+      it = aimLock.it;
+      show = true;
+    } else if (!isTouch) {
+      show = true;
+    }
+  }
+  aimRing.visible = show;
+  if (!show) return;
+  const ia = inputAxis();
+  const key = swing ? swing.kind : hitBuffer[me]?.type === 'lob' ? 'lob' : 'drive';
+  const tg = shotTarget(me, it, { x: ia.x * rightX(me), y: ia.y }, key);
+  const q = net.role === 'guest' ? net.aimQ : aimQuality(me);
+  const x = clamp(tg.x, -4.5, 4.5), z = -sideZ(me) * clamp(tg.depth, 2, 9.2);
+  aimRing.position.set(x, 0.016, z);
+  const r = aimMat.uniforms.radius;
+  r.value += (aimRadius(myShotErr(), tg, q) - r.value) * 0.3;
+}
+
+function humanShot(p, pd) {
+  const it = pd.intent;
+  const tg = shotTarget(p.team, it, it ? null : axisFor(p.team), pd.kind);
+  let mods;
+  if (it && pd.kind === 'lob' && it.k === 'lob') mods = { lobT: tg.lobT, lobClear: tg.lobClear, depth: tg.depth };
+  else if (it && pd.kind !== 'drop') mods = { vhMul: tg.vhMul ?? 1, depth: tg.depth };
+  else mods = { depth: tg.depth };
+  mods.aim = tg;
+  performShot(p, pd.kind, tg.x, 0, pd, mods);
 }
 
 function aiShot(p, pd) {
@@ -1261,7 +1418,7 @@ function predictFor(team) {
     if (stop) break;
     if ((sideOf(b.z) === team || (b.outside && r.outPlay)) && b.y > 0.08 && b.y < MAX_HIT_Y && (!r.serve || r.valid) &&
       (!b.outside || (r.outPlay && reachableOutside(b)))) {
-      samples.push({ t, x: b.x, y: b.y, z: b.z, bounced: r.valid });
+      samples.push({ t, x: b.x, y: b.y, z: b.z, bounced: r.valid, spd: Math.hypot(b.vx, b.vy, b.vz) });
     }
   }
   return { samples, firstBounce, endFault };
@@ -1308,11 +1465,13 @@ function bestIntercept(p, samples, reaction, allowOut) {
     if (out && !allowOut) continue;
     const x = out ? Math.sign(s.x) * clamp(Math.abs(s.x) - 0.5, 5.35, 8.9) : clamp(s.x - rightX(p.team) * 0.5, -4.75, 4.75);
     const z = clampZ(p.team, s.z + sideZ(p.team) * 0.1, out);
-    const need = reaction + routeDist(p, x, z) / (p.speedMax * 0.92);
+    // Backwards running is slower; budget for it so the AI doesn't promise itself lobs it can't reach.
+    const back = Math.max(0, (z - p.pos.z) * sideZ(p.team));
+    const need = reaction + (routeDist(p, x, z) + back * (1 / BACKPEDAL - 1)) / (p.speedMax * 0.92);
     if (need > s.t) continue;
     const comfy = (s.y > 0.35 && s.y < 1.5) || (s.y > 1.9 && s.y < 2.8);
     const score = s.t + (comfy ? 0 : 0.8);
-    if (!best || score < best.score) best = { p, x, z, y: s.y, t: simTime + s.t, score };
+    if (!best || score < best.score) best = { p, x, z, y: s.y, t: simTime + s.t, score, spd: s.spd };
     if (comfy) break;
   }
   return best;
@@ -1526,6 +1685,7 @@ const inDoorway = (z) => Math.abs(z) > DOOR_Z0 && Math.abs(z) < DOOR_Z1;
 // Walls block players except at the doors. Outside, players can roam the whole length of the court,
 // but may only come back in through a door on their own half.
 function movePlayer(p, dt, desiredX, desiredZ) {
+  if (desiredZ * sideZ(p.team) > 0) desiredZ *= BACKPEDAL;
   const k = Math.min(1, dt * 10);
   p.vel.x += (desiredX - p.vel.x) * k;
   p.vel.z += (desiredZ - p.vel.z) * k;
@@ -1615,10 +1775,7 @@ function stepBallAndRules(dt) {
 function simStep(dt) {
   simTime += dt;
   phaseT += dt;
-  for (const t of [0, 1]) {
-    if (hitBuffer[t] && (hitBuffer[t].t -= dt) <= 0) hitBuffer[t] = null;
-    manualSwitchT[t] -= dt;
-  }
+  for (const t of [0, 1]) manualSwitchT[t] -= dt;
 
   switch (phase) {
     case 'preServe':
@@ -1721,7 +1878,9 @@ function updateVisuals(dt, rdt) {
   }
 
   crowd.update(rdt);
+  club.update(rdt);
   updateFx(rdt, bx, by, bz);
+  updateAim();
 
   // Camera x is in view space; the guest's world is spun 180°.
   const k = Math.min(1, rdt * 2.5);
@@ -1812,6 +1971,7 @@ function renderSmashFx(kind, x, y, z, full) {
   fx.shake = big ? 0.6 : 0.42;
   restartAnim($('speedlines'), 'show');
   crowd.celebrate(big ? 1 : 0.75);
+  club.celebrate(big ? 1 : 0.75);
   sfx.crowd(big ? 1.1 : 0.7, big);
 }
 
@@ -1916,42 +2076,49 @@ function fitPortrait(me) {
 let portraitShift = 0;
 
 // Closest camera distance (along the given pitch) that keeps every fit point on screen, centred vertically.
+const fitFlat = new Float32Array(3 * 16);
 function fitCourt(fov, pitch, mTop, mBot) {
   const th = Math.tan((fov * Math.PI) / 360), tw = th * camera.aspect;
   const s = Math.sin(pitch), c = Math.cos(pitch);
   let minX = Infinity, maxX = -Infinity;
-  for (const p of fitPts) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]); }
+  const n = Math.min(fitPts.length, 16);
+  for (let i = 0; i < n; i++) {
+    const p = fitPts[i];
+    fitFlat[i * 3] = p[0]; fitFlat[i * 3 + 1] = p[1]; fitFlat[i * 3 + 2] = p[2];
+    minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
+  }
   const cx = (minX + maxX) / 2;
   const fits = (tz, d) => {
     const cy = d * s, cz = tz + d * c;
     let lo = Infinity, hi = -Infinity;
-    for (const [x, y, z] of fitPts) {
-      const vx = x - cx, vy = y - cy, vz = z - cz;
+    for (let i = 0; i < n * 3; i += 3) {
+      const vx = fitFlat[i] - cx, vy = fitFlat[i + 1] - cy, vz = fitFlat[i + 2] - cz;
       const depth = -s * vy - c * vz;
       if (depth < 1) return false;
       const ny = (c * vy - s * vz) / (depth * th);
       if (Math.abs(vx / (depth * tw)) > 1 || ny > 1 - mTop || ny < -1 + mBot) return false;
-      lo = Math.min(lo, ny); hi = Math.max(hi, ny);
+      if (ny < lo) lo = ny;
+      if (ny > hi) hi = ny;
     }
     fitMid = (lo + hi) / 2;
     fitSpan = hi - lo;
     return true;
   };
-  let bestD = Infinity;
+  let bestD = Infinity, bestTz = 0;
   for (let tz = -10; tz <= 10; tz += 0.5) {
     let lo = 2, hi = 160;
     if (!fits(tz, hi)) continue;
-    for (let i = 0; i < 18; i++) {
+    for (let i = 0; i < 14; i++) {
       const mid = (lo + hi) / 2;
       if (fits(tz, mid)) hi = mid; else lo = mid;
     }
-    bestD = Math.min(bestD, hi);
+    if (hi < bestD) { bestD = hi; bestTz = tz; }
   }
   if (!isFinite(bestD)) bestD = 30;
   // A little slack so a band of positions fits, then pick the one that centres the court.
   const d = bestD * 1.03, band = (mBot - mTop) / 2;
   let bestZ = 0, bestOff = Infinity, mid = 0, span = 0;
-  for (let tz = -10; tz <= 10; tz += 0.05) {
+  for (let tz = Math.max(-10, bestTz - 2.5); tz <= Math.min(10, bestTz + 2.5); tz += 0.05) {
     if (!fits(tz, d)) continue;
     const off = Math.abs(fitMid - band);
     if (off < bestOff) { bestOff = off; bestZ = tz; mid = fitMid; span = fitSpan; }
@@ -1992,6 +2159,7 @@ function renderAnnounce(s) {
     else sfx.crowd(s.big ? 0.6 : 0.35, false);
     if (mine) haptic(30);
     crowd.celebrate(s.big ? 1 : mine ? 0.45 : 0.25);
+    club.celebrate(s.big ? 1 : mine ? 0.45 : 0.25);
   } else if (s.k === 'chase') {
     if (s.team === me) showMessage('Out of the court!', 'Run out through the door', 'neutral');
   } else {
@@ -2068,37 +2236,61 @@ function buildMenu() {
     fmtKey = b.dataset.v; F = FORMATS[fmtKey]; save.lastFormat = fmtKey; Store.save(save); buildMenu();
   });
   $('opt-guides').checked = save.settings.guides;
-  $('opt-auto').checked = save.settings.autoSwing;
-  $('menu-racket').textContent = Store.racketTier(save.upgrades).name;
+  $('menu-racket').textContent = racketById(save.rackets.equipped).name;
   $('menu-record').textContent = `${save.stats.wins}W – ${save.stats.losses}L`;
   updateMoney();
 }
 
+let shopBrand = null;
+const ATTR_COLORS = { control: '#5bd6ff', power: '#ff5d4a', spin: '#b77bff', weight: '#7cff6b' };
 function buildShop() {
-  const u = save.upgrades;
-  const tier = Store.racketTier(u);
-  $('shop-racket-name').textContent = tier.name;
-  $('shop-racket-swatch').style.background = `#${tier.color.toString(16).padStart(6, '0')}`;
-  const next = Store.TIERS.find((t) => t.min > Store.totalLevel(u));
-  $('shop-racket-next').textContent = next ? `${next.min - Store.totalLevel(u)} more upgrades to unlock ${next.name}` : 'Fully upgraded';
-  $('shop-list').innerHTML = Store.UPGRADES.map((up) => {
-    const lvl = u[up.id];
-    const cost = Store.upgradeCost(lvl);
-    const pips = Array.from({ length: Store.MAX_LEVEL }, (_, i) => `<i class="${i < lvl ? 'on' : ''}"></i>`).join('');
-    const btn = cost === null
-      ? '<button class="btn small" disabled>MAX</button>'
-      : `<button class="btn small primary" data-up="${up.id}" ${save.money < cost ? 'disabled' : ''}>${formatMoney(cost)}</button>`;
-    return `<div class="shop-row"><div><b>${up.name}</b><p>${up.desc}</p><div class="pips">${pips}</div></div>${btn}</div>`;
+  const eq = racketById(save.rackets.equipped);
+  if (!BRANDS.some((b) => b.id === shopBrand)) shopBrand = eq.brand;
+  const brand = BRANDS.find((b) => b.id === shopBrand);
+  const tabs = $('shop-tabs');
+  tabs.innerHTML = BRANDS.map((b) => `<button data-b="${b.id}" class="${b.id === shopBrand ? 'sel' : ''}">${b.name}</button>`).join('');
+  tabs.querySelectorAll('button').forEach((el) => {
+    el.style.font = BRANDS.find((b) => b.id === el.dataset.b).font.replace('S', '15px');
+    el.onclick = () => { shopBrand = el.dataset.b; buildShop(); };
+  });
+  $('shop-tagline').textContent = brand.tagline;
+  const list = $('shop-list');
+  const rackets = CATALOG.filter((r) => r.brand === shopBrand);
+  list.innerHTML = rackets.map((r) => {
+    const owned = save.rackets.owned.includes(r.id), on = r.id === eq.id;
+    const bars = ATTRS.map(({ id, label }) => {
+      const v = r.attrs[id];
+      const val = id === 'weight' ? `${r.grams}g` : v;
+      return `<div class="rk-bar"><span>${label}</span><i><b style="width:${v * 10}%;background:${ATTR_COLORS[id]}"></b>` +
+        `<u style="left:${eq.attrs[id] * 10}%"></u></i><em>${val}</em></div>`;
+    }).join('');
+    const btn = on
+      ? '<button class="btn small" disabled>Equipped</button>'
+      : owned
+        ? `<button class="btn small primary" data-eq="${r.id}">Equip</button>`
+        : `<button class="btn small primary" data-buy="${r.id}" ${save.money < r.price ? 'disabled' : ''}>${formatMoney(r.price)}</button>`;
+    const S = SHAPES[r.shape];
+    return `<div class="rk-card${on ? ' equipped' : ''}"><canvas class="rk-art" width="140" height="252" data-art="${r.id}"></canvas>` +
+      `<div class="rk-info"><div class="rk-name">${r.name}</div><div class="rk-shape">${S.label} · ${S.role}</div>` +
+      `<div class="rk-bars">${bars}</div><div class="rk-foot"><span class="rk-tier">${'★'.repeat(r.tier + 1)}</span>${btn}</div></div></div>`;
   }).join('');
-  $('shop-list').querySelectorAll('[data-up]').forEach((b) => b.onclick = () => {
-    const id = b.dataset.up;
-    const cost = Store.upgradeCost(save.upgrades[id]);
-    if (cost === null || save.money < cost) return;
-    save.money -= cost;
-    save.upgrades[id]++;
+  list.querySelectorAll('[data-art]').forEach((c) => drawRacketCard(c, racketById(c.dataset.art)));
+  list.querySelectorAll('[data-buy]').forEach((b) => b.onclick = () => {
+    const r = racketById(b.dataset.buy);
+    if (save.rackets.owned.includes(r.id) || save.money < r.price) return;
+    save.money -= r.price;
+    save.rackets.owned.push(r.id);
+    save.rackets.equipped = r.id;
     Store.save(save);
     applyRacketLook();
     haptic(15);
+    buildShop();
+  });
+  list.querySelectorAll('[data-eq]').forEach((b) => b.onclick = () => {
+    save.rackets.equipped = b.dataset.eq;
+    Store.save(save);
+    applyRacketLook();
+    haptic(10);
     buildShop();
   });
   updateMoney();
@@ -2111,23 +2303,24 @@ function startMatch() {
   matchWinner = null;
   serveFaults = 0;
   hitCounter = 0;
-  // Online matches are on level terms: upgrades don't count.
-  const hs = Store.racketStats(online ? { power: 0, control: 0, spin: 0, reach: 0 } : save.upgrades);
+  // Online matches are on level terms: every racket plays the same there.
+  const hs = online ? LEVEL_STATS : racketStats(racketById(save.rackets.equipped));
   for (const p of teamPlayers(0)) {
     p.stats = hs;
     p.reach = hs.reach;
-    p.speedMax = PLAYER_SPEED;
+    p.speedMax = PLAYER_SPEED * hs.speed;
   }
   for (const p of teamPlayers(1)) {
     p.stats = online ? hs : { power: D.power, err: D.err, spin: 1, reach: D.reach };
     p.reach = online ? hs.reach : D.reach;
-    p.speedMax = online ? PLAYER_SPEED : PLAYER_SPEED * D.speed;
+    p.speedMax = PLAYER_SPEED * (online ? hs.speed : D.speed);
   }
-  setRackets(myRacketColor(), online ? net.guestColor : null);
+  if (!online) cpuRackets = pickCpuRackets();
+  setRackets(save.rackets.equipped, online ? net.guestRacket : cpuRackets);
   if (online) {
     net.remoteAxis = { x: 0, y: 0 };
     net.rematch = { me: false, them: false };
-    hostSend({ t: 'start', fmt: fmtKey, rc: [myRacketColor(), net.guestColor] });
+    hostSend({ t: 'start', fmt: fmtKey, rc: [save.rackets.equipped, net.guestRacket] });
   }
   enterMatchUI();
   setupServe();
@@ -2145,6 +2338,7 @@ function enterMatchUI() {
   netPaused = false;
   mode = 'playing';
   Object.assign(fx, { shake: 0, trail: 0 });
+  aimLock = null;
   setViewSide(myTeam());
 }
 
@@ -2367,7 +2561,7 @@ async function joinOnline(raw) {
   net.role = 'guest';
   net.lastRecv = performance.now();
   onlineStatus('Connected — waiting for the host…');
-  netSend({ t: 'hello', rc: myRacketColor(), touch: isTouch });
+  netSend({ t: 'hello', rc: save.rackets.equipped, touch: isTouch });
 }
 
 function inviteUrl() {
@@ -2378,27 +2572,43 @@ function inviteUrl() {
 }
 
 async function shareInvite() {
+  if (!net.code || !navigator.share) return copyInvite();
+  try {
+    await navigator.share({ title: 'Padel Royale', text: `Play padel with me! Code: ${net.code}`, url: inviteUrl() });
+  } catch { /* share sheet dismissed */ }
+}
+
+let allowCopy = false;
+async function copyInvite() {
   if (!net.code) return;
   const url = inviteUrl();
-  if (isTouch && navigator.share) {
-    try {
-      await navigator.share({ title: 'Padel Royale', text: `Play padel with me! Code: ${net.code}`, url });
-      return;
-    } catch { /* fall back to copying */ }
-  }
+  let ok = false;
   try {
     await navigator.clipboard.writeText(url);
-    onlineStatus('Invite link copied — send it to your friend. Waiting…');
+    ok = true;
   } catch {
-    onlineStatus(`Send your friend this link: ${url}`);
+    // Older WebViews: copy via a temporary textarea (the global copy blocker lets this one through).
+    const ta = document.createElement('textarea');
+    ta.value = url;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, url.length);
+    allowCopy = true;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    allowCopy = false;
+    ta.remove();
   }
+  onlineStatus(ok ? 'Link copied — paste it to your friend. Waiting…' : `Send your friend this link: ${url}`);
+  if (ok) haptic(10);
 }
 
 const ACTS = ['drive', 'lob', 'smash', 'switch'];
 function onHostData(d) {
   switch (d.t) {
     case 'hello':
-      net.guestColor = (Number(d.rc) || 0) & 0xffffff;
+      net.guestRacket = racketById(String(d.rc)).id;
       touchTeam[1] = d.touch === true;
       if (mode !== 'playing') startMatch();
       break;
@@ -2407,7 +2617,6 @@ function onHostData(d) {
       const l = Math.hypot(x, y);
       if (l > 1) { x /= l; y /= l; }
       net.remoteAxis = { x, y };
-      net.remoteAuto = d.a === true;
       break;
     }
     case 'act':
@@ -2447,7 +2656,7 @@ function onGuestData(d) {
 function guestStart(d) {
   F = FORMATS[d.fmt] || FORMATS.quick;
   const rc = Array.isArray(d.rc) ? d.rc : [];
-  setRackets((Number(rc[0]) || 0) & 0xffffff, (Number(rc[1]) || 0) & 0xffffff);
+  setRackets(rc[0], rc[1]);
   score = null;
   matchWinner = null;
   lastPointWinner = null;
@@ -2473,7 +2682,7 @@ function guestEvent(d) {
       break;
     case 'sw':
       if (p && STROKE_TIMING[d.anim] && Array.isArray(d.c)) {
-        p.ch.startSwing(d.anim, d.side === -1 ? -1 : 1, new THREE.Vector3(...d.c.map(Number)), simTime, Number(d.ct), { pos: p.pos, jump: Number(d.j) || 0, spin: Number(d.sp) || 0 });
+        p.ch.startSwing(d.anim, d.side === -1 ? -1 : 1, new THREE.Vector3(...d.c.map(Number)), simTime, Number(d.ct), { pos: p.pos, jump: Number(d.j) || 0, spin: Number(d.sp) || 0, dive: d.dv === true });
       }
       break;
     case 'fx':
@@ -2506,6 +2715,7 @@ function guestStep(realDt) {
   if (!snaps.length) return;
   const newest = snaps[snaps.length - 1].st;
   const target = newest - NET_INTERP;
+  net.aimQ = clamp(Number(snaps[snaps.length - 1].aq) || 1, 0.05, 1);
   if (net.renderT === null || Math.abs(net.renderT - target) > 0.3) net.renderT = target;
   else net.renderT += realDt * GAME_SPEED + (target - net.renderT) * Math.min(1, realDt * 3);
   const rt = Math.min(net.renderT, newest);
@@ -2549,7 +2759,7 @@ function sendSnapshot(now) {
   netSend({
     t: 's', st: simTime, b: [r3(ball.x), r3(ball.y), r3(ball.z)], p, ph: phase,
     sv: serve ? players.indexOf(serve.server) : -1, lh: rally ? rally.lastHit : -1,
-    pw: lastPointWinner ?? -1, c: ctrl[1],
+    pw: lastPointWinner ?? -1, c: ctrl[1], aq: Math.round(aimQuality(1) * 100) / 100,
     mb: m.b ? m.b.map(r3) : 0, mi: m.i ? m.i.map(r3) : 0,
   });
 }
@@ -2560,7 +2770,7 @@ function sendGuestInput(now) {
   const li = net.lastIn;
   if (x === li.x && y === li.y && now - li.t < 250) return;
   net.lastIn = { x, y, t: now };
-  netSend({ t: 'in', x, y, a: !!save.settings.autoSwing });
+  netSend({ t: 'in', x, y });
 }
 
 function netTick(now, realDt) {
@@ -2582,6 +2792,8 @@ $('join-btn').onclick = () => joinOnline($('join-code').value);
 $('join-code').addEventListener('input', (e) => { e.target.value = normalizeCode(e.target.value); });
 $('join-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinOnline(e.target.value); });
 $('share-btn').onclick = shareInvite;
+$('copy-btn').onclick = copyInvite;
+if (!navigator.share) show('share-btn', false);
 $('online-back').onclick = () => { leaveOnline(); show('online', false); show('menu', true); buildMenu(); };
 $('shop-btn').onclick = () => { buildShop(); show('menu', false); show('shop', true); };
 $('shop-back').onclick = () => { show('shop', false); show('menu', true); buildMenu(); };
@@ -2592,8 +2804,7 @@ $('rematch-btn').onclick = rematch;
 $('result-shop-btn').onclick = () => { show('result', false); buildShop(); show('shop', true); };
 $('result-menu-btn').onclick = toMenu;
 $('opt-guides').onchange = (e) => { save.settings.guides = e.target.checked; Store.save(save); };
-$('opt-auto').onchange = (e) => { save.settings.autoSwing = e.target.checked; Store.save(save); };
-document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && !AUTOPILOT) pauseGame(); });
 
 // ---------------------------------------------------------------- loop
 let last = performance.now();
@@ -2648,6 +2859,8 @@ function frame(now) {
 idleCourt();
 buildMenu();
 applyRacketLook();
+// Compile every shader up front so the first smash, aim circle or racket swap doesn't hitch.
+renderer.compile(scene, camera);
 const joinParam = new URLSearchParams(location.search).get('join');
 if (joinParam) {
   history.replaceState(null, '', location.pathname);
@@ -2656,10 +2869,12 @@ if (joinParam) {
 }
 if (AUTOPILOT) {
   window.__padel = {
-    ball, players, planTeam, predictFor, bestIntercept,
+    ball, players, planTeam, predictFor, bestIntercept, camera, THREE, club, renderer,
     step: (n) => { for (let i = 0; i < n && mode === 'playing'; i++) simStep(DT); },
     render: () => { updateVisuals(1 / 60, 1 / 60); renderer.render(scene, camera); },
     get rally() { return rally; }, get phase() { return phase; }, get simTime() { return simTime; },
+    get aim() { return { visible: aimRing.visible, pos: aimRing.position.toArray(), radius: aimMat.uniforms.radius.value }; },
+    aimQuality,
   };
 }
 camera.position.set(0, camBase.y, camBase.z);

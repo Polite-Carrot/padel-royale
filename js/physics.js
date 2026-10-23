@@ -218,8 +218,10 @@ function flight(b0, maxT = 6) {
 export function solveShot(from, target, T, spin, netClear) {
   const aim = { x: target.x, z: target.z };
   let v = null, res = null;
-  for (let tries = 0; tries < 10; tries++) {
-    for (let it = 0; it < 6; it++) {
+  for (let tries = 0; tries < 16; tries++) {
+    // Secant steps per axis: heavy spin and drag mean the landing moves less than the aim does.
+    let prev = null;
+    for (let it = 0; it < 12; it++) {
       v = {
         x: (aim.x - from.x) / T,
         y: (BALL_R - from.y + 0.5 * G * T * T) / T,
@@ -227,8 +229,16 @@ export function solveShot(from, target, T, spin, netClear) {
       };
       res = flight({ ...from, vx: v.x, vy: v.y, vz: v.z, wx: spin.x, wy: spin.y, wz: spin.z });
       const ex = target.x - res.x, ez = target.z - res.z;
-      if (Math.abs(ex) + Math.abs(ez) < 0.04) break;
-      aim.x += ex; aim.z += ez;
+      if (Math.abs(ex) + Math.abs(ez) < 0.02) break;
+      let gx = 1, gz = 1;
+      if (prev) {
+        const dax = aim.x - prev.ax, dlx = res.x - prev.rx, daz = aim.z - prev.az, dlz = res.z - prev.rz;
+        if (Math.abs(dax) > 1e-4 && Math.abs(dlx) > 1e-4) gx = Math.min(4, Math.max(0.5, dax / dlx));
+        if (Math.abs(daz) > 1e-4 && Math.abs(dlz) > 1e-4) gz = Math.min(4, Math.max(0.5, daz / dlz));
+      }
+      prev = { ax: aim.x, az: aim.z, rx: res.x, rz: res.z };
+      aim.x += ex * gx;
+      aim.z += ez * gz;
     }
     const netOk = res.netY === null || res.netY - BALL_R >= netHeight(res.netX) + netClear;
     const wallOk = res.wallY === null || res.wallY - BALL_R >= sideWallTop(res.wallZ) + 0.25 || throughDoor(res.wallZ, res.wallY);

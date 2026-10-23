@@ -52,22 +52,20 @@
       </div>
       <div class="toggles">
         <label><input type="checkbox" id="opt-guides" /> Show landing guides</label>
-        <label><input type="checkbox" id="opt-auto" /> Auto-swing</label>
       </div>
     </div>
   </div>
 
   <div id="shop" class="overlay hidden">
-    <div class="panel">
+    <div class="panel shop-panel">
       <div class="panel-head">
         <h2>Racket Shop</h2>
         <div class="money"><i class="coin"></i><span class="money-value">$0</span></div>
       </div>
-      <div class="racket-card">
-        <div id="shop-racket-swatch" class="swatch"></div>
-        <div><b id="shop-racket-name"></b><p id="shop-racket-next"></p></div>
-      </div>
-      <div id="shop-list"></div>
+      <div id="shop-tabs" class="shop-tabs"></div>
+      <p id="shop-tagline" class="shop-tagline"></p>
+      <div id="shop-list" class="shop-list"></div>
+      <p class="note">Control shrinks your aim circle · Power = ball speed · Spin = kick and bite · Lighter = quicker feet. White ticks mark your equipped racket. Online matches use level rackets.</p>
       <button id="shop-back" class="btn">Back</button>
     </div>
   </div>
@@ -75,7 +73,7 @@
   <div id="online" class="overlay hidden">
     <div class="panel narrow">
       <h2>Play a Friend</h2>
-      <p class="note">Head to head online — you each control a pair. Level rackets, no upgrades.</p>
+      <p class="note">Head to head online — you each control a pair. Rackets are level online: your racket shows, its stats don't count.</p>
       <div id="online-choose">
         <button id="host-btn" class="btn primary big">Create game</button>
         <div class="label">Match length: <b id="online-fmt"></b></div>
@@ -88,7 +86,10 @@
       <div id="online-wait" class="hidden">
         <div class="label">Your game code</div>
         <div id="online-code" class="code"></div>
-        <button id="share-btn" class="btn primary">Copy invite link</button>
+        <div class="invite-row">
+          <button id="share-btn" class="btn primary">Share invite</button>
+          <button id="copy-btn" class="btn primary">Copy link</button>
+        </div>
       </div>
       <p id="online-status" class="online-status"></p>
       <button id="online-back" class="btn">Back</button>

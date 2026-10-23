@@ -1,4 +1,5 @@
 import * as THREE from '../vendor/three.module.js';
+import { racketGeometry, racketTexture, brandOf } from './rackets.js';
 
 // Procedural padel player: FK legs/spine, 2-bone IK arms, keyframed strokes whose
 // contact key is the predicted ball position, so racket and ball meet exactly.
@@ -155,54 +156,121 @@ const OUTLINE = new THREE.ShaderMaterial({
   fragmentShader: 'uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }',
   side: THREE.BackSide,
 });
-function outline(mesh) {
-  const o = new THREE.Mesh(mesh.geometry, OUTLINE);
-  o.castShadow = false;
-  mesh.add(o);
-  return mesh;
+// The same ink outline for skinned bodies: pushed out along the skinned normal.
+const OUTLINE_SKIN = new THREE.ShaderMaterial({
+  uniforms: OUTLINE.uniforms,
+  vertexShader: `#include <common>
+#include <skinning_pars_vertex>
+uniform float thickness;
+void main() {
+  #include <skinbase_vertex>
+  #include <beginnormal_vertex>
+  #include <skinnormal_vertex>
+  #include <begin_vertex>
+  #include <skinning_vertex>
+  transformed += normalize(objectNormal) * thickness;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+}`,
+  fragmentShader: OUTLINE.fragmentShader,
+  side: THREE.BackSide,
+});
+
+// Merges parts ({ geo, M, color, bone }) into one vertex-coloured geometry; with bones, each part rides its bone.
+const _mv = new THREE.Vector3(), _mn = new THREE.Matrix3();
+function mergeParts(parts, skinned = false) {
+  let vc = 0, ic = 0;
+  for (const { geo } of parts) {
+    vc += geo.attributes.position.count;
+    ic += geo.index ? geo.index.count : geo.attributes.position.count;
+  }
+  const pos = new Float32Array(vc * 3), nor = new Float32Array(vc * 3), col = new Float32Array(vc * 3), idx = new Uint32Array(ic);
+  const si = skinned ? new Uint16Array(vc * 4) : null, sw = skinned ? new Float32Array(vc * 4) : null;
+  let vo = 0, io = 0;
+  for (const { geo, M, color, bone } of parts) {
+    const p = geo.attributes.position, n = geo.attributes.normal;
+    _mn.getNormalMatrix(M);
+    for (let i = 0; i < p.count; i++) {
+      const o = vo + i;
+      _mv.fromBufferAttribute(p, i).applyMatrix4(M).toArray(pos, o * 3);
+      _mv.fromBufferAttribute(n, i).applyMatrix3(_mn).normalize().toArray(nor, o * 3);
+      color.toArray(col, o * 3);
+      if (skinned) { si[o * 4] = bone; sw[o * 4] = 1; }
+    }
+    if (geo.index) for (let i = 0; i < geo.index.count; i++) idx[io++] = geo.index.getX(i) + vo;
+    else for (let i = 0; i < p.count; i++) idx[io++] = vo + i;
+    vo += p.count;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  if (skinned) {
+    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+  }
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.computeBoundingSphere();
+  return g;
+}
+
+// Bakes every body part into skinned meshes sharing one skeleton: toon-lit parts, unlit face details,
+// and one ink outline. Each vertex rides the bone its part hung from, so the rig animates unchanged.
+function bakeSkin(root) {
+  root.updateMatrixWorld(true);
+  const bones = [], meshes = [];
+  root.traverse((o) => {
+    if (o.isBone) bones.push(o);
+    else if (o.isMesh) meshes.push(o);
+  });
+  const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const lit = [], flat = [], ink = [];
+  for (const m of meshes) {
+    const part = { geo: m.geometry, M: new THREE.Matrix4().multiplyMatrices(toRoot, m.matrixWorld), color: m.material.color, bone: bones.indexOf(m.parent) };
+    (m.material.isMeshBasicMaterial ? flat : lit).push(part);
+    if (m.userData.ink) ink.push(part);
+  }
+  const skeleton = new THREE.Skeleton(bones);
+  const make = (parts, material) => {
+    const mesh = new THREE.SkinnedMesh(mergeParts(parts, true), material);
+    mesh.frustumCulled = false;
+    root.add(mesh);
+    mesh.bind(skeleton);
+    return mesh;
+  };
+  make(lit, toon(0xffffff, { vertexColors: true })).castShadow = true;
+  make(flat, new THREE.MeshBasicMaterial({ vertexColors: true }));
+  make(ink, OUTLINE_SKIN);
+  for (const m of meshes) {
+    m.removeFromParent();
+    m.geometry.dispose();
+  }
+}
+
+function bone(parent, x, y, z) {
+  const b = new THREE.Bone();
+  b.position.set(x, y, z);
+  parent.add(b);
+  return b;
 }
 
 // ---------------------------------------------------------------- racket model
-let holeTex = null;
-function racketFaceTexture() {
-  if (holeTex) return holeTex;
-  const c = document.createElement('canvas');
-  c.width = c.height = 128;
-  const g = c.getContext('2d');
-  g.fillStyle = '#ffffff';
-  g.fillRect(0, 0, 128, 128);
-  g.fillStyle = 'rgba(20,20,24,0.85)';
-  for (let y = 18; y < 112; y += 11) {
-    for (let x = 18 + ((y / 11) % 2) * 5; x < 112; x += 11) {
-      if ((x - 64) ** 2 + (y - 64) ** 2 < 44 ** 2) { g.beginPath(); g.arc(x, y, 2.6, 0, TAU); g.fill(); }
-    }
-  }
-  g.strokeStyle = 'rgba(255,255,255,0.9)';
-  g.lineWidth = 5;
-  g.beginPath(); g.arc(64, 64, 52, 0.4, 1.4); g.stroke();
-  holeTex = new THREE.CanvasTexture(c);
-  holeTex.colorSpace = THREE.SRGBColorSpace;
-  return holeTex;
-}
-
-function createRacket(color) {
+// Head shape, frame and face art come from the catalogue racket set with setRacket(). Grip, throat and frame
+// share one vertex-coloured mesh, so a racket is three draw calls: body, face art and the frame's ink.
+const GRIP = new THREE.CylinderGeometry(0.017, 0.019, 0.15, 10);
+const THROAT = new THREE.CylinderGeometry(0.014, 0.02, 0.09, 8);
+const GRIP_M = new THREE.Matrix4().makeTranslation(0, 0.075, 0);
+const THROAT_M = new THREE.Matrix4().makeTranslation(0, 0.19, 0);
+const HEAD_M = new THREE.Matrix4().makeTranslation(0, RACKET_HEAD, 0);
+function createRacket() {
   const group = new THREE.Group();
-  const dark = toon(0x18181c);
-  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.019, 0.15, 10), toon(0xf2f2f2));
-  grip.position.y = 0.075;
-  const throat = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.02, 0.09, 8), dark);
-  throat.position.y = 0.19;
-  const faceMat = toon(color, { map: racketFaceTexture() });
-  const face = outline(new THREE.Mesh(new THREE.CylinderGeometry(0.128, 0.128, 0.034, 32), faceMat));
-  face.rotation.x = Math.PI / 2;
-  face.scale.set(0.92, 1, 1.07);
-  face.position.y = RACKET_HEAD;
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.128, 0.011, 8, 36), dark);
-  rim.scale.set(0.92, 1.07, 1);
-  rim.position.y = RACKET_HEAD;
-  for (const m of [grip, throat, face, rim]) m.castShadow = true;
-  group.add(grip, throat, face, rim);
-  return { group, faceMat };
+  const faceMat = toon(0xffffff);
+  const body = new THREE.Mesh(undefined, toon(0xffffff, { vertexColors: true }));
+  const face = new THREE.Mesh(undefined, faceMat);
+  const ink = new THREE.Mesh(undefined, OUTLINE);
+  face.position.y = ink.position.y = RACKET_HEAD;
+  body.castShadow = face.castShadow = true;
+  group.add(body, face, ink);
+  return { group, body, face, ink, faceMat, id: null };
 }
 
 // ---------------------------------------------------------------- IK helpers
@@ -261,38 +329,29 @@ export class Character {
     const mouthMat = new THREE.MeshBasicMaterial({ color: 0x5a1a22 }), lipMat = new THREE.MeshBasicMaterial({ color: 0x3a1418 });
     const cap = (r, len, m, seg = 12) => new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 4, seg), m);
     const sph = (r, m, ws = 16, hs = 12) => new THREE.Mesh(new THREE.SphereGeometry(r, ws, hs), m);
-    // Body parts get an ink outline; small face details (no shadow) stay clean.
-    const add = (parent, mesh, x, y, z, shadow = true) => {
+    // Body parts get an ink outline; small face details stay clean. Everything is baked into skinned meshes below.
+    const add = (parent, mesh, x, y, z, ink = true) => {
       mesh.position.set(x, y, z);
-      mesh.castShadow = shadow;
-      if (shadow) outline(mesh);
+      mesh.userData.ink = ink;
       parent.add(mesh);
       return mesh;
     };
 
     const root = this.root = new THREE.Group();
     root.scale.setScalar(SCALE);
-    const pelvis = this.pelvis = new THREE.Group();
-    pelvis.position.y = HIP_H;
-    root.add(pelvis);
+    const pelvis = this.pelvis = bone(root, 0, HIP_H, 0);
     add(pelvis, sph(0.16, shorts), 0, 0, 0).scale.set(1.12, 0.72, 0.82);
 
     this.legs = [];
     for (const sx of [1, -1]) {
-      const thigh = new THREE.Group();
-      thigh.position.set(sx * 0.095, -0.03, 0);
-      pelvis.add(thigh);
+      const thigh = bone(pelvis, sx * 0.095, -0.03, 0);
       add(thigh, cap(0.088, 0.12, shorts), 0, -0.1, 0);
       add(thigh, cap(0.07, 0.26, skin), 0, -0.24, 0);
-      const knee = new THREE.Group();
-      knee.position.y = -THIGH;
-      thigh.add(knee);
+      const knee = bone(thigh, 0, -THIGH, 0);
       add(knee, cap(0.054, 0.3, skin), 0, -0.2, 0);
       add(knee, sph(0.06, skin, 10, 8), 0, -0.15, 0.022).scale.set(0.9, 1.7, 0.85);
       add(knee, new THREE.Mesh(new THREE.CylinderGeometry(0.054, 0.05, 0.12, 10), white), 0, -0.37, 0);
-      const ankle = new THREE.Group();
-      ankle.position.y = -SHIN;
-      knee.add(ankle);
+      const ankle = bone(knee, 0, -SHIN, 0);
       const foot = add(ankle, cap(0.052, 0.13, shoe, 10), 0, -0.035, -0.05);
       foot.rotation.x = Math.PI / 2;
       foot.scale.set(1.08, 1, 0.72);
@@ -301,65 +360,51 @@ export class Character {
     }
 
     const lathe = (pts) => new THREE.Mesh(new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), 22), shirt);
-    const spine = this.spine = new THREE.Group();
-    spine.position.y = 0.06;
-    pelvis.add(spine);
+    const spine = this.spine = bone(pelvis, 0, 0.06, 0);
     add(spine, lathe([[0.001, -0.06], [0.14, -0.05], [0.142, 0.06], [0.134, 0.18], [0.14, 0.3], [0.001, 0.31]]), 0, 0, 0).scale.set(1.05, 1, 0.74);
-    const chest = this.chest = new THREE.Group();
-    chest.position.y = 0.26;
-    spine.add(chest);
+    const chest = this.chest = bone(spine, 0, 0.26, 0);
     add(chest, lathe([[0.001, -0.06], [0.142, -0.05], [0.162, 0.07], [0.172, 0.15], [0.155, 0.21], [0.1, 0.26], [0.055, 0.285], [0.001, 0.29]]), 0, 0, 0).scale.set(1.1, 1, 0.7);
 
     this.arms = [];
     for (const sx of [1, -1]) {
-      const shoulder = new THREE.Group();
-      shoulder.position.set(sx * 0.19, 0.17, 0);
-      chest.add(shoulder);
+      const shoulder = bone(chest, sx * 0.19, 0.17, 0);
       add(shoulder, sph(0.058, shirt, 12, 10), 0, 0, 0);
-      const upper = new THREE.Group();
-      shoulder.add(upper);
+      const upper = bone(shoulder, 0, 0, 0);
       add(upper, cap(0.056, 0.05, shirt), 0, -0.06, 0);
       add(upper, cap(0.047, 0.2, skin), 0, -0.16, 0);
-      const elbow = new THREE.Group();
-      elbow.position.y = -L_UP;
-      upper.add(elbow);
+      const elbow = bone(upper, 0, -L_UP, 0);
       add(elbow, cap(0.041, 0.19, skin), 0, -0.13, 0);
       add(elbow, new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.045, 10), band), 0, -0.235, 0);
       add(elbow, sph(0.043, skin, 10, 8), 0, -0.3, 0).scale.set(0.85, 1.15, 0.65);
       this.arms.push({ shoulder, upper, elbow });
     }
 
-    const neck = new THREE.Group();
-    neck.position.y = 0.27;
-    chest.add(neck);
+    const neck = bone(chest, 0, 0.27, 0);
     add(neck, new THREE.Mesh(new THREE.CylinderGeometry(0.046, 0.052, 0.12, 10), skin), 0, 0.03, 0);
-    const head = this.head = new THREE.Group();
-    head.position.y = 0.08;
+    const head = this.head = bone(neck, 0, 0.08, 0);
     head.rotation.order = 'YXZ';
     // Big cartoon head.
     head.scale.setScalar(1.32);
-    neck.add(head);
     add(head, sph(0.11, skin, 24, 18), 0, 0.1, 0).scale.set(0.88, 1.1, 0.97);
     for (const sx of [1, -1]) add(head, sph(0.026, skin, 8, 6), sx * 0.096, 0.1, 0.005).scale.set(0.45, 1, 0.8);
     add(head, sph(0.019, skin, 8, 6), 0, 0.085, -0.104, false).scale.set(0.8, 1.05, 1.25);
 
     this.eyes = [];
     for (const sx of [1, -1]) {
-      const eye = new THREE.Group();
-      eye.position.set(sx * 0.038, 0.118, -0.09);
+      const eye = bone(head, sx * 0.038, 0.118, -0.09);
       eye.scale.setScalar(1.45);
-      head.add(eye);
       add(eye, sph(0.019, eyeWhite, 12, 10), 0, 0, 0, false).scale.set(1, 1, 0.6);
-      const pupil = add(eye, sph(0.0105, iris, 10, 8), 0, 0, -0.0095, false);
-      pupil.scale.set(1, 1, 0.5);
-      const brow = add(head, new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.009, 0.012), hair), sx * 0.038, 0.16, -0.097, false);
+      const pupil = bone(eye, 0, 0, -0.0095);
+      add(pupil, sph(0.0105, iris, 10, 8), 0, 0, 0, false).scale.set(1, 1, 0.5);
+      const brow = bone(head, sx * 0.038, 0.16, -0.097);
+      add(brow, new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.009, 0.012), hair), 0, 0, 0, false);
       this.eyes.push({ eye, pupil, brow, side: sx });
     }
-    const mouth = new THREE.Group();
-    mouth.position.set(0, 0.05, -0.099);
-    head.add(mouth);
-    this.mouthOpen = add(mouth, sph(0.02, mouthMat, 12, 8), 0, 0, 0, false);
-    this.smileArc = add(mouth, new THREE.Mesh(new THREE.TorusGeometry(0.019, 0.0042, 6, 14, Math.PI), lipMat), 0, 0.008, -0.002, false);
+    const mouth = bone(head, 0, 0.05, -0.099);
+    this.mouthOpen = bone(mouth, 0, 0, 0);
+    add(this.mouthOpen, sph(0.02, mouthMat, 12, 8), 0, 0, 0, false);
+    this.smileArc = bone(mouth, 0, 0.008, -0.002);
+    add(this.smileArc, new THREE.Mesh(new THREE.TorusGeometry(0.019, 0.0042, 6, 14, Math.PI), lipMat), 0, 0, 0, false);
 
     const hs = look.hairStyle;
     const top = add(head, new THREE.Mesh(new THREE.SphereGeometry(hs === 'buzz' ? 0.114 : 0.118, 22, 12, 0, TAU, 0, Math.PI * (hs === 'buzz' ? 0.4 : 0.47)), hair), 0, 0.112, 0.01);
@@ -374,8 +419,9 @@ export class Character {
       hb.rotation.x = Math.PI / 2 - 0.3;
       hb.scale.set(0.92, 1, 1);
     }
+    bakeSkin(root);
 
-    this.racket = createRacket(0x9aa5b1);
+    this.racket = createRacket();
     root.add(this.racket.group);
 
     this.swing = null;
@@ -392,8 +438,22 @@ export class Character {
     this.headPitch = 0;
   }
 
-  setRacketColor(hex) {
-    this.racket.faceMat.color.setHex(hex);
+  setRacket(r) {
+    const R = this.racket;
+    if (R.id === r.id) return;
+    R.id = r.id;
+    const g = racketGeometry(r.shape);
+    const frame = new THREE.Color(brandOf(r).frame);
+    R.body.geometry.dispose();
+    R.body.geometry = mergeParts([
+      { geo: GRIP, M: GRIP_M, color: new THREE.Color(r.colors[1]) },
+      { geo: THROAT, M: THROAT_M, color: frame },
+      { geo: g.frame, M: HEAD_M, color: frame },
+    ]);
+    R.face.geometry = g.face;
+    R.ink.geometry = g.frame;
+    R.faceMat.map = racketTexture(r);
+    R.faceMat.needsUpdate = true;
   }
 
   get swinging() {
@@ -405,11 +465,11 @@ export class Character {
     const overhead = anim === 'smash' || anim === 'pop' || anim === 'bandeja';
     const dx = contactWorld.x - opts.pos.x, dz = contactWorld.z - opts.pos.z;
     const dh = Math.hypot(dx, dz) || 1;
-    const l = clamp(dh - (overhead ? 0.35 : 0.72), 0, 0.7);
+    const l = clamp(dh - (overhead ? 0.35 : 0.72), 0, opts.dive ? 1.3 : 0.7);
     this.swing = {
       anim, side, contact: contactWorld.clone(),
       start: contactTime - T.tc * T.dur, dur: T.dur, tc: T.tc,
-      yaw: this.yaw, jump: opts.jump || 0, spin: opts.spin || 0,
+      yaw: this.yaw, jump: opts.jump || 0, spin: opts.spin || 0, dive: !!opts.dive,
       lunge: new THREE.Vector3((dx / dh) * l, 0, (dz / dh) * l),
     };
   }
@@ -487,6 +547,12 @@ export class Character {
       lhA = ev.lhA; lhB = ev.lhB; lhE = ev.e;
       stance = bell(tn, 0.15, 0.95);
       cr = ev.cr + clamp((0.75 - _C.y) / 0.6, 0, 1) * 0.45 * bell(tn, sw.tc - 0.35, sw.tc + 0.3);
+      // Diving reach: throw the body forward and down into the lunge.
+      if (sw.dive) {
+        const db = bell(tn, sw.tc - 0.4, sw.tc + 0.35);
+        lean -= 0.45 * db;
+        cr += 0.25 * db;
+      }
     } else if (st.holdBall) {
       _head.set(0.42, 0.95, 0.12);
       lhA = lhB = 'BALL';
@@ -654,11 +720,12 @@ export class Character {
       eye.brow.position.y = 0.16 + e.up * 0.008;
     }
     const sm = e.smile;
-    this.smileArc.visible = Math.abs(sm) > 0.12;
+    // Face pieces live on bones, so hiding one means collapsing its bone.
     this.smileArc.rotation.z = sm > 0 ? Math.PI : 0;
-    this.smileArc.scale.set(1, 0.25 + Math.abs(sm) * 0.75, 1);
     this.smileArc.position.y = sm > 0 ? 0.008 : -0.008;
-    this.mouthOpen.scale.set(1.15 - e.open * 0.25, 0.12 + e.open * 0.95, 0.4);
-    this.mouthOpen.visible = e.open > 0.05 || Math.abs(sm) <= 0.12;
+    if (Math.abs(sm) > 0.12) this.smileArc.scale.set(1, 0.25 + Math.abs(sm) * 0.75, 1);
+    else this.smileArc.scale.setScalar(1e-4);
+    if (e.open > 0.05 || Math.abs(sm) <= 0.12) this.mouthOpen.scale.set(1.15 - e.open * 0.25, 0.12 + e.open * 0.95, 0.4);
+    else this.mouthOpen.scale.setScalar(1e-4);
   }
 }

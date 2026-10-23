@@ -26,6 +26,7 @@ export class Crowd {
       const m = new THREE.InstancedMesh(geo, mat(), count);
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.frustumCulled = false;
+      m.matrixAutoUpdate = false;
       scene.add(m);
       return m;
     };
@@ -35,6 +36,7 @@ export class Crowd {
     this.eyes = new THREE.InstancedMesh(new THREE.SphereGeometry(0.03, 6, 5), new THREE.MeshBasicMaterial({ color: 0x111111 }), n * 2);
     this.eyes.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.eyes.frustumCulled = false;
+    this.eyes.matrixAutoUpdate = false;
     scene.add(this.eyes);
     this.hands = mk(new THREE.SphereGeometry(0.07, 8, 6), n * 2);
     const c = new THREE.Color();
