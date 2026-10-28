@@ -1,22 +1,14 @@
 #!/bin/zsh
-# Regenerates every native icon/splash from assets/icon-only.png (1024) and assets/splash.png (2732) using macOS sips.
+# Regenerates native assets; --icons-only leaves the existing splash screens unchanged.
 set -e
 cd "$(dirname "$0")/.."
-ICON=assets/icon-only.png
+node tools/render-icon.mjs
+if [[ "${1:-}" == "--icons-only" ]]; then exit 0; fi
 SPLASH=assets/splash.png
 RES=android/app/src/main/res
 XC=ios/App/App/Assets.xcassets
 
-cp "$ICON" "$XC/AppIcon.appiconset/AppIcon-512@2x.png"
 for f in splash-2732x2732.png splash-2732x2732-1.png splash-2732x2732-2.png; do cp "$SPLASH" "$XC/Splash.imageset/$f"; done
-
-typeset -A LAUNCHER=(mdpi 48 hdpi 72 xhdpi 96 xxhdpi 144 xxxhdpi 192)
-typeset -A FOREGROUND=(mdpi 108 hdpi 162 xhdpi 216 xxhdpi 324 xxxhdpi 432)
-for d in ${(k)LAUNCHER}; do
-  sips -z $LAUNCHER[$d] $LAUNCHER[$d] "$ICON" --out "$RES/mipmap-$d/ic_launcher.png" >/dev/null
-  sips -z $LAUNCHER[$d] $LAUNCHER[$d] "$ICON" --out "$RES/mipmap-$d/ic_launcher_round.png" >/dev/null
-  sips -z $FOREGROUND[$d] $FOREGROUND[$d] "$ICON" --out "$RES/mipmap-$d/ic_launcher_foreground.png" >/dev/null
-done
 
 # Portrait/landscape splash drawables: scale the square splash to cover, then centre-crop.
 splash() { # dir width height

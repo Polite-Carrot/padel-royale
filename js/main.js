@@ -19,12 +19,14 @@ const STRETCH = 1.35;
 const IDEAL_D = 0.62;
 const MAX_HIT_Y = 3.1;
 const CONTACT_HORIZON = 0.62;
+// Seconds of extra CPU reaction at full pressure: big shots catch it flat-footed.
+const PRESSURE_LAG = 0.45;
 const KIND_ERR = { drive: 1, volley: 0.85, lob: 0.9, drop: 1.15, bandeja: 0.9, smash: 1.2, pop: 1.5 };
 
 const DIFF = {
-  easy: { label: 'Easy', reaction: 0.38, speed: 0.74, err: 1.7, reach: 1.0, miss: 0.12, netRate: 0.2, smart: 0.3, power: 0.85, reward: 120 },
-  medium: { label: 'Medium', reaction: 0.22, speed: 0.9, err: 1.0, reach: 1.1, miss: 0.045, netRate: 0.45, smart: 0.7, power: 0.95, reward: 250 },
-  hard: { label: 'Hard', reaction: 0.12, speed: 1.0, err: 0.65, reach: 1.2, miss: 0.018, netRate: 0.7, smart: 0.97, power: 1.05, reward: 500 },
+  easy: { label: 'Easy', reaction: 0.38, speed: 0.74, err: 1.7, reach: 1.0, miss: 0.12, pressure: 0.7, netRate: 0.2, smart: 0.3, power: 0.85, reward: 120 },
+  medium: { label: 'Medium', reaction: 0.22, speed: 0.9, err: 1.0, reach: 1.1, miss: 0.045, pressure: 0.5, netRate: 0.45, smart: 0.7, power: 0.95, reward: 250 },
+  hard: { label: 'Hard', reaction: 0.12, speed: 1.0, err: 0.65, reach: 1.2, miss: 0.018, pressure: 0.28, netRate: 0.7, smart: 0.97, power: 1.08, reward: 500 },
 };
 
 const FORMATS = {
@@ -43,8 +45,10 @@ const baseYaw = (t) => (t === 0 ? 0 : Math.PI);
 const pan = (x) => x / 6;
 const gauss = () => Math.sqrt(-2 * Math.log(Math.random() || 1e-9)) * Math.cos(2 * Math.PI * Math.random());
 const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
-// Dev aid: ?autopilot lets the AI play your team too.
-const AUTOPILOT = new URLSearchParams(location.search).has('autopilot');
+const PARAMS = new URLSearchParams(location.search);
+// Dev aids: ?autopilot lets the AI play your team too; ?debug (or autopilot) exposes window.__padel to test harnesses.
+const AUTOPILOT = PARAMS.has('autopilot');
+const DEBUG = AUTOPILOT || PARAMS.has('debug');
 
 // Online play: the host runs the whole simulation; the guest drives team 1 and renders snapshots.
 const net = {
@@ -560,7 +564,6 @@ const ctrl = [0, 0];
 // Tap-to-move target per team, swipe-chosen serve aim, and which teams use touch (swipe) controls.
 const moveTarget = [null, null];
 const serveIntent = [null, null];
-const touchTeam = [isTouch, false];
 let netPaused = false;
 
 function inputAxis() {
@@ -893,29 +896,28 @@ function startToss() {
 
 function doServe() {
   const T = serve.team, p = serve.server, box = serve.boxSign;
-  let tx, depth;
-  if (isHuman(T)) {
-    const it = serveIntent[T];
-    // Swipe serve: direction aims across the box, swipe length sets the depth.
-    const a = it ? { x: it.ax * rightX(T), y: clamp((it.len - 0.08) / 0.15, 0, 2) - 1 } : axisFor(T);
-    tx = box * 2.5 + a.x * 1.9;
-    depth = 5.3 + a.y * 1.1;
+  const human = isHuman(T);
+  let tx, tz;
+  if (human) {
+    // A human serve lands somewhere inside its circle (kept 12 cm inside the edge).
+    const tg = serveTarget(T, serveIntent[T], axisFor(T));
+    const a = Math.random() * Math.PI * 2, r = Math.max(0, aimRadius(p.stats.err, tg) - 0.12) * Math.sqrt(Math.random());
+    tx = tg.x + Math.cos(a) * r;
+    tz = -sideZ(T) * tg.depth + Math.sin(a) * r;
   } else {
-    tx = Math.random() < D.smart * 0.6 ? box * (Math.random() < 0.5 ? 0.9 : 4.0) : box * (1.2 + Math.random() * 2.6);
-    depth = 4.6 + Math.random() * 1.8;
+    const x = Math.random() < D.smart * 0.6 ? box * (Math.random() < 0.5 ? 0.9 : 4.0) : box * (1.2 + Math.random() * 2.6);
+    tx = box * clamp(x * box, 0.4, 4.6);
+    tz = -sideZ(T) * clamp(4.6 + Math.random() * 1.8, 2.5, 6.6);
   }
-  tx = box * clamp(tx * box, 0.4, 4.6);
-  depth = clamp(depth, 2.5, 6.6);
-  const tz = -sideZ(T) * depth;
   const from = { x: ball.x, y: ball.y, z: ball.z };
   const dist = Math.hypot(tx - from.x, tz - from.z);
   const ux = (tx - from.x) / dist, uz = (tz - from.z) / dist;
   const s = -60 * p.stats.spin;
   const spin = { x: s * uz, y: 0, z: -s * ux };
   const v = solveShot(from, { x: tx, z: tz }, dist / (15 * p.stats.power), spin, 0.25);
-  applyError(v, p.stats.err * 0.7);
+  if (!human) applyError(v, p.stats.err * 0.7);
   launch(v, spin);
-  rally = { lastHit: T, lastKind: 'serve', serve: true, valid: false, netTouch: false, cpuIgnore: false, outPlay: false, stillT: 0, hitId: ++hitCounter };
+  rally = { lastHit: T, lastKind: 'serve', serve: true, valid: false, netTouch: false, cpuIgnore: false, outPlay: false, stillT: 0, hitId: ++hitCounter, pressure: 0.2 };
   p.cooldown = 0.35;
   p.ch.grunt(0.35);
   phase = 'play';
@@ -950,6 +952,17 @@ const reachableOutside = (b) => Math.abs(b.x) < 8.9 && Math.abs(b.z) < 10.8;
 // Only the designated receiver may play the serve.
 const mayPlay = (p) => !(rally.serve && !rally.valid && p !== serve.receiver);
 
+// The ball eases off as it comes deep into a human pair's half (Tennis Clash style) while players keep full
+// speed, giving time to read it, tap a spot and get there. Every prediction steps the ball the same way.
+const BALL_SLOW = 0.45;
+function ballRate(b, lastHit) {
+  if (!isHuman(1 - lastHit)) return 1;
+  const u = clamp((b.z * sideZ(1 - lastHit) - 0.5) / 4.5, 0, 1);
+  // Big shots (high pressure) keep more of their pace: they really are harder to get to.
+  const ease = (1 - BALL_SLOW) * (1 - 0.6 * (rally?.pressure || 0));
+  return 1 - ease * u * u * (3 - 2 * u);
+}
+
 // Simulates the ball ahead to find where this player would meet it. Contact is
 // deterministic, so a swing started now lands its racket exactly on the ball.
 function findContact(p, horizon) {
@@ -960,7 +973,7 @@ function findContact(p, horizon) {
   let t = 0, prevD = Infinity, stretch = null;
   while (t < horizon) {
     ev.length = 0;
-    stepBall(b, DT, ev);
+    stepBall(b, DT * ballRate(b, rally.lastHit), ev);
     t += DT;
     for (const e of ev) {
       if (e.type === 'ground') {
@@ -985,11 +998,11 @@ function findContact(p, horizon) {
     const d = Math.hypot(b.x - (p.pos.x + p.vel.x * k), b.z - (p.pos.z + p.vel.z * k));
     // Dive only as a last resort: the ball is about to pass and no normal contact is coming.
     if (t <= 0.16 && d > p.reach * 1.05 && d <= p.reach * STRETCH && b.y > 0.2 && b.y < 2.3 && (!stretch || d < stretch.d)) {
-      stretch = { t, x: b.x, y: b.y, z: b.z, bounced: valid, d, stretch: true, spd: Math.hypot(b.vx, b.vy, b.vz) };
+      stretch = { t, x: b.x, y: b.y, z: b.z, bounced: valid, d, stretch: true, spd: Math.hypot(b.vx, b.vy, b.vz), vx: b.vx, vz: b.vz };
     }
     if (d > p.reach || (b.y < 0.3 && b.vy > 0) || (b.y > 1.7 && b.vy > 3.5)) { prevD = d; continue; }
     if (d <= IDEAL_D + 0.08 || d > prevD || (b.y > 1.9 && d < p.reach * 0.85)) {
-      return { t, x: b.x, y: b.y, z: b.z, bounced: valid, d, spd: Math.hypot(b.vx, b.vy, b.vz) };
+      return { t, x: b.x, y: b.y, z: b.z, bounced: valid, d, spd: Math.hypot(b.vx, b.vy, b.vz), vx: b.vx, vz: b.vz };
     }
     prevD = d;
   }
@@ -1050,6 +1063,9 @@ function tryCommit(p, type, intent = null) {
   if (p.cooldown > 0 || p.pending) return false;
   const c = findContact(p, CONTACT_HORIZON);
   if (!c) return false;
+  // Still running to the spot you tapped: the shot waits for the ball there instead of swinging on the way.
+  const mt = isHuman(p.team) && p === teamPlayers(p.team)[ctrl[p.team]] ? moveTarget[p.team] : null;
+  if (mt && Math.hypot(mt.x - p.pos.x, mt.z - p.pos.z) > 0.35 && Math.hypot(c.x - mt.x, c.z - mt.z) > 1.0) return false;
   let kind = type;
   if (type === 'ai') kind = aiChooseKind(p, c);
   else if (type === 'swipe') kind = swipeKind(intent, p, c);
@@ -1059,16 +1075,17 @@ function tryCommit(p, type, intent = null) {
   const s = strokeFor(kind, p, c);
   const lead = strokeLead(s.anim);
   if (c.t > lead + DT * 0.5) return false;
-  const incoming = Math.hypot(ball.vx, ball.vy, ball.vz);
-  // Fresh roll per attempt; a second chance at the same ball (e.g. off the glass) is rarely fluffed.
-  const retry = p.missFor === rally.hitId;
-  const whiff = type === 'ai' && Math.random() < D.miss * (1 + incoming / 25) * (retry ? 0.25 : 1);
-  if (whiff) p.missFor = rally.hitId;
   const rushed = clamp((lead - c.t) / lead, 0, 1);
-  // The strike quality is fixed as the swing starts, so the aim circle can show exactly how wild the shot can be.
-  const q = qualityAt(p, s.kind, c.d, c.y, c.spd, (0.5 * Math.hypot(p.vel.x, p.vel.z)) / p.speedMax,
-    Math.max(0, p.vel.z * sideZ(p.team)) / p.speedMax, rushed, !!c.stretch);
-  p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed, whiff, whooshed: false, intent, stretch: !!c.stretch, q };
+  // Placement is judged where the player will be at contact (feet plant once the swing starts).
+  const k = Math.min(c.t, 0.25) * 0.5;
+  const lat = lateralOf(p.pos.x + p.vel.x * k, p.pos.z + p.vel.z * k, c.x, c.z, c.vx, c.vz);
+  const place = placementAt(s.kind, lat, c.y, (0.5 * Math.hypot(p.vel.x, p.vel.z)) / p.speedMax, rushed, !!c.stretch);
+  const diff = difficultyOf(p, s.kind, c.spd, Math.max(0, p.vel.z * sideZ(p.team)) / p.speedMax);
+  // Fresh roll per attempt; a second chance at the same ball (e.g. off the glass) is rarely fluffed. Hard balls get fluffed more.
+  const retry = p.missFor === rally.hitId;
+  const whiff = type === 'ai' && Math.random() < (D.miss + D.pressure * (1 - strikeQ(place, diff, false))) * (retry ? 0.25 : 1);
+  if (whiff) p.missFor = rally.hitId;
+  p.pending = { time: simTime + c.t, kind: s.kind, anim: s.anim, rushed, whiff, whooshed: false, intent, stretch: !!c.stretch, place, diff };
   let jump = 0, spin = 0;
   if (c.stretch) {
     // Desperate lunge: a low flying leap towards the ball.
@@ -1134,38 +1151,65 @@ function updateSwings() {
   }
 }
 
-// 0..1: how cleanly the ball is met. Drives shot pace, AI error, and the size of the human aim circle.
-function qualityAt(p, kind, d, y, incoming, moving, retreat, rushed, stretch) {
+// How well set the player is: the ball passing ~0.55 m to the side (0.3 m for overheads) at a comfortable height,
+// feet planted, swing on time. 1 = perfectly placed; this is what tapping the right spot earns.
+function placementAt(kind, lateral, y, moving, rushed, stretch) {
   const overhead = kind === 'smash' || kind === 'pop' || kind === 'bandeja';
   let q = 1;
-  q -= clamp(Math.abs(d - (overhead ? 0.4 : IDEAL_D)) / Math.max(0.35, p.reach - 0.25), 0, 1) * 0.45;
+  q -= clamp((Math.abs(lateral - (overhead ? 0.3 : 0.55)) - 0.12) / 0.5, 0, 1) * 0.5;
+  if (!overhead && kind !== 'lob' && kind !== 'drop') q -= clamp((Math.abs(y - 1) - 0.4) / 0.6, 0, 1) * 0.25;
+  q -= clamp(moving, 0, 1) * 0.2;
   q -= rushed * 0.45;
-  q -= clamp(moving, 0, 1) * 0.18;
-  if (y < 0.3) q -= 0.15;
-  if (y > 1.9 && !overhead) q -= 0.2;
-  q -= clamp((incoming - 13) / 20, 0, 0.3);
-  // A smash coming back at you is hard to control, whatever the bounce does.
-  if (rally && (rally.lastKind === 'smash' || rally.lastKind === 'pop')) q -= 0.22;
-  if (overhead) {
-    // Retreating overheads (chasing a lob back) are hard to control.
-    q -= clamp(retreat, 0, 1) * 0.25;
-    if (Math.abs(p.pos.z) > 6.5) q -= 0.15;
-  }
   // Diving scrambles are pure survival shots.
-  if (stretch) q -= 0.45;
-  return clamp(q, 0.05, 1);
+  if (stretch) q -= 0.5;
+  return clamp(q, 0, 1);
+}
+
+// How hard the incoming ball is to control whatever the footwork: pressure from the shot (pace, space, a smash),
+// raw pace, and retreating overheads.
+function difficultyOf(p, kind, incoming, retreat) {
+  let d = clamp((incoming - 13) / 20, 0, 0.3) + (rally?.pressure || 0) * PRESSURE_BITE;
+  if (rally && (rally.lastKind === 'smash' || rally.lastKind === 'pop')) d += 0.22;
+  if (kind === 'smash' || kind === 'pop' || kind === 'bandeja') {
+    d += clamp(retreat, 0, 1) * 0.25;
+    if (Math.abs(p.pos.z) > 6.5) d += 0.15;
+  }
+  return d;
+}
+
+const strikeQ = (place, diff, perfect) => clamp(perfect ? 1 - diff * 0.5 : place - diff, 0.05, 1);
+
+// A decisive swipe: the top of the pace range for drives and smashes, a full swipe for lobs. Drops are pure touch.
+function swipePower(it, kind) {
+  if (!it || it.k === 'drop') return true;
+  if (it.k === 'lob') return it.len >= 0.16;
+  return it.speed >= (kind === 'smash' || kind === 'pop' ? 3.2 : 1.7);
+}
+
+// Perfect placement plus a decisive swipe makes a PERFECT shot: the tightest circle and extra pace.
+function strikeOf(pd) {
+  const perfect = pd.place >= 0.88 && swipePower(pd.intent, pd.kind);
+  return { q: strikeQ(pd.place, pd.diff, perfect), perfect };
+}
+
+// How far to the side of the player the ball travels past (its horizontal line of flight).
+function lateralOf(px, pz, bx, bz, vx, vz) {
+  const h = Math.hypot(vx, vz), dx = px - bx, dz = pz - bz;
+  return h < 1 ? Math.hypot(dx, dz) : Math.abs(dx * vz - dz * vx) / h;
 }
 
 function shotQuality(p, kind, pd) {
-  return qualityAt(p, kind, Math.hypot(ball.x - p.pos.x, ball.z - p.pos.z), ball.y, Math.hypot(ball.vx, ball.vy, ball.vz),
-    Math.hypot(p.vel.x, p.vel.z) / p.speedMax, Math.max(0, p.vel.z * sideZ(p.team)) / p.speedMax, pd.rushed, pd.stretch);
+  const place = placementAt(kind, lateralOf(p.pos.x, p.pos.z, ball.x, ball.z, ball.vx, ball.vz), ball.y,
+    Math.hypot(p.vel.x, p.vel.z) / p.speedMax, pd.rushed, pd.stretch);
+  return strikeQ(place, difficultyOf(p, kind, Math.hypot(ball.vx, ball.vy, ball.vz), Math.max(0, p.vel.z * sideZ(p.team)) / p.speedMax), false);
 }
 
 function performShot(p, kind, tx, depthAdj, pd, mods = {}) {
   const team = p.team, dir = -sideZ(team), st = p.stats;
   // Human shots carry their aim (the circle's centre) and land somewhere inside the circle shown for them.
   const aim = mods.aim || null;
-  const q = aim && pd.q != null ? pd.q : shotQuality(p, kind, pd);
+  const strike = aim && pd.place != null ? strikeOf(pd) : null;
+  const q = strike ? strike.q : shotQuality(p, kind, pd);
   const fromOutside = Math.abs(ball.x) > COURT.halfW;
 
   const from = { x: ball.x, y: ball.y, z: ball.z };
@@ -1212,6 +1256,10 @@ function performShot(p, kind, tx, depthAdj, pd, mods = {}) {
   depth = clamp(depth + depthAdj, 2.0, 9.2);
   tx = clamp(tx, -4.5, 4.5);
   vh *= st.power * (0.75 + 0.25 * q);
+  if (strike?.perfect) {
+    vh *= 1.12;
+    perfectFx(team);
+  }
   let tz = dir * depth;
   if (aim) {
     // Kept 12 cm inside the edge: a very fast ball's bounce point can't be placed finer than one physics step.
@@ -1227,7 +1275,22 @@ function performShot(p, kind, tx, depthAdj, pd, mods = {}) {
   const v = solveShot(from, { x: tx, z: tz }, T || dist / vh, spin, clear);
   if (!aim) applyError(v, st.err * (0.35 + 2.4 * Math.pow(1 - q, 1.3)) * (KIND_ERR[kind] || 1) * (0.7 + vh / 40));
   launch(v, spin);
+  rally.pressure = shotPressure(team, kind, q, Math.hypot(v.x, v.y, v.z), tx, tz);
   finishHit(p, kind, Math.hypot(v.x, v.y, v.z));
+}
+
+// How much a shot hurts the other pair: clean contact, pace, and above all putting it into space away from them.
+// Smashes, drops past back-court players and lobs over net players add their own sting.
+const PRESSURE_BITE = 0.55;
+function shotPressure(team, kind, q, speed, tx, tz) {
+  const opp = teamPlayers(1 - team);
+  const gap = Math.min(...opp.map((o) => Math.hypot(o.pos.x - tx, o.pos.z - tz)));
+  let pr = 0.25 * q + 0.3 * ramp(13, 28, speed) + 0.35 * ramp(1.2, 4.5, gap);
+  if (kind === 'smash') pr += 0.25;
+  else if (kind === 'pop') pr += 0.35;
+  else if (kind === 'drop' && opp.every((o) => Math.abs(o.pos.z) > 6)) pr += 0.3;
+  else if (kind === 'lob' && opp.every((o) => Math.abs(o.pos.z) < 5)) pr += 0.2;
+  return clamp(pr, 0, 1);
 }
 
 function finishHit(p, kind, speed) {
@@ -1282,22 +1345,29 @@ function shotTarget(team, it, axis = null, kind = 'drive') {
 const AIM_R = 0.62;
 const spreadOf = (q) => 1 + 2 * Math.max(0, 0.9 - q);
 function aimRadius(err, tg, q = 1) {
-  const f = tg.kind === 'lob' ? 1.25 : tg.kind === 'drop' ? 0.75 : 1 + 0.5 * ramp(0.6, 3.6, tg.speed || 0);
+  const f = tg.kind === 'serve' ? 0.8 : tg.kind === 'lob' ? 1.25 : tg.kind === 'drop' ? 0.75 : 1 + 0.5 * ramp(0.6, 3.6, tg.speed || 0);
   return clamp(AIM_R * err * f * spreadOf(q), 0.22, 2.4);
 }
 // Online everyone plays level rackets, so the local aim uses the level stats there.
 const myShotErr = () => (net.role ? LEVEL_STATS.err : teamPlayers(0)[0].stats?.err ?? LEVEL_STATS.err);
+
+// Swipe serve: direction aims across the service box, swipe length sets the depth.
+function serveTarget(T, it, axis) {
+  const box = serve.boxSign;
+  const a = it ? { x: it.ax * rightX(T), y: clamp((it.len - 0.08) / 0.15, 0, 2) - 1 } : axis;
+  return { kind: 'serve', x: box * clamp(box * (box * 2.5 + a.x * 1.9), 0.4, 4.6), depth: clamp(5.3 + a.y * 1.1, 2.5, 6.6) };
+}
 
 // How cleanly a pair will strike the incoming ball: exact once a swing is under way, estimated from the
 // planned intercept before that (pace, height, a smash return), and poor if nobody can get there.
 function aimQuality(team) {
   if (!rally) return 1;
   const tps = teamPlayers(team);
-  for (const p of tps) if (p.pending) return p.pending.q;
+  for (const p of tps) if (p.pending) return p.pending.place != null ? strikeOf(p.pending).q : 1;
   const p = tps.find((pl) => pl.plan);
   if (!p) return 0.45;
   const pl = p.plan;
-  return qualityAt(p, pl.y > 1.9 ? 'smash' : 'drive', IDEAL_D, pl.y, pl.spd || 0, 0, 0, 0, false);
+  return strikeQ(1, difficultyOf(p, pl.y > 1.9 ? 'smash' : 'drive', pl.spd || 0, 0), false);
 }
 
 // Live while you swipe, locked once you release, and driven by the arrows on desktop.
@@ -1310,11 +1380,13 @@ function updateAim() {
   if ((lh === me && aimSeen.lh !== me) || (phase !== aimSeen.ph && DEAD_PHASES.includes(phase))) aimLock = null;
   aimSeen.lh = lh;
   aimSeen.ph = phase;
-  const incoming = mode === 'playing' && !netPaused && phase === 'play' && rally && rally.lastHit !== me;
+  const live = mode === 'playing' && !netPaused;
+  const serving = live && !!serve && serve.team === me && (phase === 'preServe' || phase === 'toss');
+  const incoming = live && phase === 'play' && rally && rally.lastHit !== me;
   // A swing that's under way shows exactly where it's going (the guest's swings live on the host).
-  const swing = net.role === 'guest' ? null : teamPlayers(me).find((p) => p.pending)?.pending;
+  const swing = incoming && net.role !== 'guest' ? teamPlayers(me).find((p) => p.pending)?.pending : null;
   let it = null, show = false;
-  if (incoming) {
+  if (serving || incoming) {
     if (gesture) {
       const last = gesture.pts[gesture.pts.length - 1];
       const live = classifySwipe(gesture, last[0], last[1], performance.now());
@@ -1332,9 +1404,15 @@ function updateAim() {
   aimRing.visible = show;
   if (!show) return;
   const ia = inputAxis();
-  const key = swing ? swing.kind : hitBuffer[me]?.type === 'lob' ? 'lob' : 'drive';
-  const tg = shotTarget(me, it, { x: ia.x * rightX(me), y: ia.y }, key);
-  const q = net.role === 'guest' ? net.aimQ : aimQuality(me);
+  const axis = { x: ia.x * rightX(me), y: ia.y };
+  let tg, q = 1;
+  if (serving) {
+    tg = serveTarget(me, it, axis);
+  } else {
+    const key = swing ? swing.kind : hitBuffer[me]?.type === 'lob' ? 'lob' : 'drive';
+    tg = shotTarget(me, it, axis, key);
+    q = net.role === 'guest' ? net.aimQ : aimQuality(me);
+  }
   const x = clamp(tg.x, -4.5, 4.5), z = -sideZ(me) * clamp(tg.depth, 2, 9.2);
   aimRing.position.set(x, 0.016, z);
   const r = aimMat.uniforms.radius;
@@ -1357,14 +1435,17 @@ function aiShot(p, pd) {
   let tx;
   if (Math.random() < D.smart) {
     let best = -1;
-    for (const c of [-3.9, -2.2, 0, 2.2, 3.9]) {
+    for (const c of [-4.0, -2.2, 0, 2.2, 4.0]) {
       const gap = Math.min(...opp.map((h) => Math.abs(h.pos.x - c)));
       if (gap > best) { best = gap; tx = c; }
     }
   } else {
     tx = (Math.random() * 2 - 1) * 3.2;
   }
-  performShot(p, pd.kind, tx, (Math.random() - 0.5) * 1.6, pd);
+  // With time on the ball the CPU attacks: deep into the open court with pace. Under pressure it just gets it back.
+  const attack = (pd.kind === 'drive' || pd.kind === 'volley') && Math.random() < D.smart * (1 - (rally.pressure || 0)) * 0.8;
+  if (attack) performShot(p, pd.kind, tx, 0, pd, { vhMul: 1.1 + Math.random() * 0.2, depth: 7.6 + Math.random() * 1.3 });
+  else performShot(p, pd.kind, tx, (Math.random() - 0.5) * 1.6, pd);
 }
 
 function afterHit(team, kind) {
@@ -1392,7 +1473,7 @@ function predictFor(team) {
   let firstBounce = null, endFault = false, t = 0;
   while (t < 4) {
     ev.length = 0;
-    stepBall(b, DT, ev);
+    stepBall(b, DT * ballRate(b, r.lastHit), ev);
     t += DT;
     let stop = false;
     for (const e of ev) {
@@ -1418,7 +1499,7 @@ function predictFor(team) {
     if (stop) break;
     if ((sideOf(b.z) === team || (b.outside && r.outPlay)) && b.y > 0.08 && b.y < MAX_HIT_Y && (!r.serve || r.valid) &&
       (!b.outside || (r.outPlay && reachableOutside(b)))) {
-      samples.push({ t, x: b.x, y: b.y, z: b.z, bounced: r.valid, spd: Math.hypot(b.vx, b.vy, b.vz) });
+      samples.push({ t, x: b.x, y: b.y, z: b.z, bounced: r.valid, spd: Math.hypot(b.vx, b.vy, b.vz), vx: b.vx, vz: b.vz });
     }
   }
   return { samples, firstBounce, endFault };
@@ -1454,8 +1535,11 @@ function waypoint(p, tx, tz) {
   return { x: sx * (out ? 4.3 : 5.7), z: dz };
 }
 
+// The spot to be set on: beside the ball's line of flight with the ball on the forehand side (closer in for
+// overheads), at a comfortable height, reached with time to plant the feet. It's also the marker humans tap.
 function bestIntercept(p, samples, reaction, allowOut) {
   let best = null;
+  const fh = rightX(p.team);
   for (let i = 0; i < samples.length; i += 2) {
     const s = samples[i];
     if (s.t < 0.08) continue;
@@ -1463,16 +1547,26 @@ function bestIntercept(p, samples, reaction, allowOut) {
     if (!s.bounced && Math.abs(s.z) > 5.5 && s.y < 1.9) continue;
     const out = isOut(s.x);
     if (out && !allowOut) continue;
-    const x = out ? Math.sign(s.x) * clamp(Math.abs(s.x) - 0.5, 5.35, 8.9) : clamp(s.x - rightX(p.team) * 0.5, -4.75, 4.75);
-    const z = clampZ(p.team, s.z + sideZ(p.team) * 0.1, out);
-    // Backwards running is slower; budget for it so the AI doesn't promise itself lobs it can't reach.
+    const L = s.y > 1.9 ? 0.3 : 0.55;
+    const h = Math.hypot(s.vx, s.vz);
+    let nx = fh, nz = 0;
+    if (h > 1 && Math.abs(s.vz) / h > 0.3) {
+      nx = s.vz / h;
+      nz = -s.vx / h;
+      if (nx * fh < 0) { nx = -nx; nz = -nz; }
+    }
+    const sx = s.x - nx * L, sz = s.z - nz * L;
+    const x = out ? Math.sign(s.x) * clamp(Math.abs(sx), 5.35, 8.9) : clamp(sx, -4.75, 4.75);
+    const z = clampZ(p.team, sz, out);
+    // Backwards running is slower; budget for it so nobody promises themselves lobs they can't reach.
     const back = Math.max(0, (z - p.pos.z) * sideZ(p.team));
     const need = reaction + (routeDist(p, x, z) + back * (1 / BACKPEDAL - 1)) / (p.speedMax * 0.92);
     if (need > s.t) continue;
-    const comfy = (s.y > 0.35 && s.y < 1.5) || (s.y > 1.9 && s.y < 2.8);
-    const score = s.t + (comfy ? 0 : 0.8);
+    const comfy = (s.y > 0.6 && s.y < 1.4) || (s.y > 1.9 && s.y < 2.8);
+    const slack = s.t - need;
+    const score = s.t + (comfy ? 0 : 0.8) + Math.max(0, 0.3 - slack) * 1.5;
     if (!best || score < best.score) best = { p, x, z, y: s.y, t: simTime + s.t, score, spd: s.spd };
-    if (comfy) break;
+    if (comfy && slack >= 0.3) break;
   }
   return best;
 }
@@ -1489,12 +1583,12 @@ function planTeam(team, fresh) {
   }
   if (aiTeam(team) && fresh) {
     rally.cpuIgnore = pred.endFault && Math.random() < D.smart;
-    for (const p of tps) p.reactT = D.reaction;
+    for (const p of tps) p.reactT = D.reaction + (rally.pressure || 0) * PRESSURE_LAG;
   }
   for (const p of tps) p.plan = null;
   if (aiTeam(team) && rally.cpuIgnore) return;
   const allowOut = !aiTeam(team) || rollsFor(tps[0])[2] < 0.3 + D.smart * 0.6;
-  const reaction = aiTeam(team) && fresh ? D.reaction : 0;
+  const reaction = aiTeam(team) && fresh ? D.reaction + (rally.pressure || 0) * PRESSURE_LAG : 0;
   const plans = tps.map((p) => (mayPlay(p) ? bestIntercept(p, pred.samples, reaction, allowOut) : null));
   let chosen = null;
   for (const pl of plans) {
@@ -1728,10 +1822,6 @@ function updatePlayers(dt) {
         movePlayer(p, dt, a.x * p.speedMax * slow, -sideZ(p.team) * a.y * p.speedMax * slow);
       } else if (mt) {
         seek(p, dt, mt.x, mt.z, slow);
-      } else if (touchTeam[p.team]) {
-        // Touch assist: with no tap target, run to the incoming ball (or back into position).
-        const tgt = p.plan || formationTarget(p);
-        seek(p, dt, tgt.x, tgt.z, slow);
       } else {
         movePlayer(p, dt, 0, 0);
       }
@@ -1751,7 +1841,8 @@ function updatePlayers(dt) {
       movePlayer(p, dt, p.vel.x * 0.9, p.vel.z * 0.9);
       continue;
     }
-    const tgt = p.plan || formationTarget(p);
+    // On a human pair only the player you tap goes for the ball; the partner just holds formation.
+    const tgt = (!isHuman(p.team) && p.plan) || formationTarget(p);
     seek(p, dt, tgt.x, tgt.z, slow);
   }
   for (const t of [0, 1]) {
@@ -1768,7 +1859,7 @@ function updatePlayers(dt) {
 
 function stepBallAndRules(dt) {
   events.length = 0;
-  stepBall(ball, dt, events);
+  stepBall(ball, dt * (phase === 'play' && rally ? ballRate(ball, rally.lastHit) : 1), events);
   for (const e of events) processEvent(e);
 }
 
@@ -1900,7 +1991,7 @@ function updateVisuals(dt, rdt) {
   const amp = fx.shake * fx.shake * 0.6;
   _shake.set((Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp * 0.5);
   camera.position.add(_shake);
-  const dc = AUTOPILOT && window.__cam;
+  const dc = DEBUG && window.__cam;
   if (dc && dc.follow !== undefined) {
     const fp = players[dc.follow].pos;
     camera.position.set(fp.x + dc.off[0], dc.off[1], fp.z + dc.off[2]);
@@ -1957,6 +2048,20 @@ function restartAnim(el, cls) {
   el.classList.remove(cls);
   void el.offsetWidth;
   el.classList.add(cls);
+}
+
+function showPerfect() {
+  restartAnim($('perfect'), 'show');
+  sfx.perfect();
+  haptic(18);
+}
+
+// Each player only sees their own PERFECT; the guest's comes over the wire.
+let perfectCount = 0;
+function perfectFx(team) {
+  perfectCount++;
+  if (team === myTeam()) showPerfect();
+  else hostSend({ t: 'perf' });
 }
 
 function renderSmashFx(kind, x, y, z, full) {
@@ -2173,7 +2278,7 @@ function announce(s) {
 }
 
 function renderHint(h) {
-  const how = isTouch ? 'swipe up to serve (direction aims)' : 'press SPACE (aim with arrows)';
+  const how = isTouch ? 'swipe to aim it into the box' : 'press SPACE (aim with arrows)';
   const t = h && h.team === myTeam() ? `${h.second ? 'Second serve' : 'Your serve'} — ${how}` : '';
   setHint(t);
 }
@@ -2228,7 +2333,7 @@ function buildMenu() {
     `<button data-v="${k}" class="${k === diffKey ? 'sel' : ''}">${d.label}<small>Win ${formatMoney(Math.round(d.reward * F.mult))}</small></button>`).join('');
   const fmtSeg = $('fmt-seg');
   fmtSeg.innerHTML = Object.entries(FORMATS).map(([k, f]) =>
-    `<button data-v="${k}" class="${k === fmtKey ? 'sel' : ''}">${f.label}<small>${f.desc}</small></button>`).join('');
+    `<button data-v="${k}" class="${k === fmtKey ? 'sel' : ''}">${f.label}<small>${f.setsToWin > 1 ? `Best of ${f.setsToWin * 2 - 1}` : `${f.games} games`}</small></button>`).join('');
   diffSeg.querySelectorAll('button').forEach((b) => b.onclick = () => {
     diffKey = b.dataset.v; D = DIFF[diffKey]; save.lastDifficulty = diffKey; Store.save(save); buildMenu();
   });
@@ -2236,8 +2341,10 @@ function buildMenu() {
     fmtKey = b.dataset.v; F = FORMATS[fmtKey]; save.lastFormat = fmtKey; Store.save(save); buildMenu();
   });
   $('opt-guides').checked = save.settings.guides;
-  $('menu-racket').textContent = racketById(save.rackets.equipped).name;
-  $('menu-record').textContent = `${save.stats.wins}W – ${save.stats.losses}L`;
+  const eq = racketById(save.rackets.equipped);
+  $('menu-racket').textContent = eq.name;
+  drawRacketCard($('menu-racket-art'), eq);
+  $('menu-record').textContent = `Record ${save.stats.wins}–${save.stats.losses}`;
   updateMoney();
 }
 
@@ -2561,7 +2668,7 @@ async function joinOnline(raw) {
   net.role = 'guest';
   net.lastRecv = performance.now();
   onlineStatus('Connected — waiting for the host…');
-  netSend({ t: 'hello', rc: save.rackets.equipped, touch: isTouch });
+  netSend({ t: 'hello', rc: save.rackets.equipped });
 }
 
 function inviteUrl() {
@@ -2609,7 +2716,6 @@ function onHostData(d) {
   switch (d.t) {
     case 'hello':
       net.guestRacket = racketById(String(d.rc)).id;
-      touchTeam[1] = d.touch === true;
       if (mode !== 'playing') startMatch();
       break;
     case 'in': {
@@ -2688,6 +2794,7 @@ function guestEvent(d) {
     case 'fx':
       if ((d.k === 'smash' || d.k === 'pop') && Array.isArray(d.p)) renderSmashFx(d.k, ...d.p.slice(0, 3).map(Number), d.f === true);
       break;
+    case 'perf': showPerfect(); break;
     case 'cs': p?.ch.cancelSwing(); break;
     case 'ss': p?.ch.splitStep(); break;
     case 'gr': p?.ch.grunt(Number(d.v) || 0); break;
@@ -2804,7 +2911,7 @@ $('rematch-btn').onclick = rematch;
 $('result-shop-btn').onclick = () => { show('result', false); buildShop(); show('shop', true); };
 $('result-menu-btn').onclick = toMenu;
 $('opt-guides').onchange = (e) => { save.settings.guides = e.target.checked; Store.save(save); };
-document.addEventListener('visibilitychange', () => { if (document.hidden && !AUTOPILOT) pauseGame(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && !DEBUG) pauseGame(); });
 
 // ---------------------------------------------------------------- loop
 let last = performance.now();
@@ -2867,14 +2974,16 @@ if (joinParam) {
   openOnline();
   joinOnline(joinParam);
 }
-if (AUTOPILOT) {
+if (DEBUG) {
   window.__padel = {
-    ball, players, planTeam, predictFor, bestIntercept, camera, THREE, club, renderer,
+    ball, players, planTeam, predictFor, bestIntercept, camera, THREE, club, renderer, moveFor, actionFor, aimQuality,
     step: (n) => { for (let i = 0; i < n && mode === 'playing'; i++) simStep(DT); },
     render: () => { updateVisuals(1 / 60, 1 / 60); renderer.render(scene, camera); },
     get rally() { return rally; }, get phase() { return phase; }, get simTime() { return simTime; },
+    get serve() { return serve; }, get score() { return score; }, get mode() { return mode; }, get ctrl() { return ctrl; },
+    get perfects() { return perfectCount; },
     get aim() { return { visible: aimRing.visible, pos: aimRing.position.toArray(), radius: aimMat.uniforms.radius.value }; },
-    aimQuality,
+    setDifficulty: (k) => { diffKey = k; D = DIFF[k]; },
   };
 }
 camera.position.set(0, camBase.y, camBase.z);

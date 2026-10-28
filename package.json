@@ -1,7 +1,7 @@
 {
-  "name": "padel-3d",
+  "name": "padel-royale",
   "version": "1.0.0",
-  "description": "3D padel game",
+  "description": "Padel Royale: cartoon 3D padel",
   "private": true,
   "scripts": {
     "start": "python3 tools/serve.py 8080",
@@ -19,6 +19,7 @@
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "pngjs": "^7.0.0",
     "typescript": "^5.9.0"
   }
 }

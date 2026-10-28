@@ -14,13 +14,15 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const out = path.join(root, 'www');
 
-// Everything the page loads: the page, its stylesheet, every ES module and the vendored libraries.
+// Everything the page loads: the page, its stylesheet, every ES module, the vendored libraries
+// and the bundled fonts (with their licence).
 const files = new Set(['index.html', 'styles.css']);
 for (const dir of ['js', 'vendor']) {
   for (const name of fs.readdirSync(path.join(root, dir))) {
     if (name.endsWith('.js')) files.add(`${dir}/${name}`);
   }
 }
+for (const name of fs.readdirSync(path.join(root, 'fonts'))) files.add(`fonts/${name}`);
 
 fs.rmSync(out, { recursive: true, force: true });
 for (const rel of files) {

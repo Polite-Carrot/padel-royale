@@ -9,5 +9,5 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-print(f'Padel 3D running at http://localhost:{port}  (Ctrl+C to stop)', flush=True)
+print(f'Padel Royale running at http://localhost:{port}  (Ctrl+C to stop)', flush=True)
 http.server.ThreadingHTTPServer(('127.0.0.1', port), NoCacheHandler).serve_forever()

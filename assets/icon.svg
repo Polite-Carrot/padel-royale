@@ -1,43 +1,81 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2f8cff"/>
-      <stop offset="1" stop-color="#1450b8"/>
+    <path id="racket-head" d="M512 155c113 0 186 78 186 183 0 108-65 206-137 259-16 12-29 20-49 20s-33-8-49-20c-72-53-137-151-137-259 0-105 73-183 186-183Z"/>
+    <clipPath id="racket-face">
+      <use href="#racket-head"/>
+    </clipPath>
+    <clipPath id="ball-seams">
+      <circle cx="750" cy="646" r="109"/>
+    </clipPath>
+    <linearGradient id="court-surface" x1="0" y1="0" x2="0.7" y2="1">
+      <stop stop-color="#36a397"/>
+      <stop offset="1" stop-color="#16796f"/>
     </linearGradient>
-    <linearGradient id="face" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffb05a"/>
-      <stop offset="1" stop-color="#ff6a1a"/>
+    <linearGradient id="racket-carbon" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#254b4d"/>
+      <stop offset="1" stop-color="#112e34"/>
     </linearGradient>
-    <radialGradient id="ball" cx="0.38" cy="0.35" r="0.7">
-      <stop offset="0" stop-color="#f8ffb0"/>
-      <stop offset="0.55" stop-color="#e8ff3a"/>
-      <stop offset="1" stop-color="#a8c400"/>
+    <radialGradient id="ball-felt" cx="0.32" cy="0.25" r="0.8">
+      <stop stop-color="#f1f5b2"/>
+      <stop offset="0.55" stop-color="#d9e87c"/>
+      <stop offset="1" stop-color="#a9c34e"/>
     </radialGradient>
+    <pattern id="net-mesh" width="22" height="20" patternUnits="userSpaceOnUse">
+      <path d="M0 0h22v20" fill="none" stroke="#0d4c48" stroke-width="2"/>
+    </pattern>
+    <pattern id="drilled-holes" width="46" height="46" patternUnits="userSpaceOnUse">
+      <circle cx="23" cy="23" r="10" fill="#071f25" stroke="#487474" stroke-width="2"/>
+      <path d="M16 28a9 9 0 0 0 14-1" fill="none" stroke="#83a9a0" stroke-opacity="0.5" stroke-width="2"/>
+    </pattern>
+    <pattern id="felt-grain" width="11" height="11" patternUnits="userSpaceOnUse">
+      <path d="m2 3 2-1m3 6 2-1" stroke="#5d7a24" stroke-opacity="0.16" stroke-width="1"/>
+    </pattern>
   </defs>
-  <rect width="1024" height="1024" fill="url(#bg)"/>
-  <!-- court lines in perspective -->
-  <g stroke="#ffffff" stroke-opacity="0.35" stroke-width="14" fill="none">
-    <path d="M250 1024 L420 330 L604 330 L774 1024"/>
-    <path d="M330 700 L694 700"/>
-    <path d="M512 330 L512 700"/>
-  </g>
-  <!-- racket -->
-  <g transform="rotate(-32 470 560)">
-    <rect x="440" y="700" width="60" height="220" rx="26" fill="#1b1f26"/>
-    <rect x="446" y="760" width="48" height="150" rx="20" fill="#f2f2f2"/>
-    <path d="M470 690 L440 640 L500 640 Z" fill="#1b1f26"/>
-    <ellipse cx="470" cy="470" rx="215" ry="240" fill="#1b1f26"/>
-    <ellipse cx="470" cy="470" rx="190" ry="215" fill="url(#face)"/>
-    <g fill="#1b1f26" fill-opacity="0.85">
-      <circle cx="400" cy="380" r="13"/><circle cx="470" cy="380" r="13"/><circle cx="540" cy="380" r="13"/>
-      <circle cx="365" cy="445" r="13"/><circle cx="435" cy="445" r="13"/><circle cx="505" cy="445" r="13"/><circle cx="575" cy="445" r="13"/>
-      <circle cx="400" cy="510" r="13"/><circle cx="470" cy="510" r="13"/><circle cx="540" cy="510" r="13"/>
-      <circle cx="435" cy="575" r="13"/><circle cx="505" cy="575" r="13"/>
+  <g id="background">
+    <rect width="1024" height="1024" fill="#12665f"/>
+    <g transform="rotate(-13 512 512)">
+      <path d="M-150 1120 195 58h634l345 1062Z" fill="url(#court-surface)"/>
+      <path d="M195 58h634l345 1062H-150Z" fill="none" stroke="#d5efdc" stroke-width="9"/>
+      <path d="M126 270h772M-52 817h1128M512 58v212m0 547v303" fill="none" stroke="#d5efdc" stroke-width="8"/>
+      <path d="M195 58V-80M512 58V-80M829 58V-80M195-28h634" fill="none" stroke="#a0d7c6" stroke-width="8"/>
+      <path d="M-150 1120 195 58M829 58l345 1062" fill="none" stroke="#073e3b" stroke-width="18"/>
+      <path d="M47 510h930v91H47Z" fill="#0e544f" fill-opacity="0.28"/>
+      <path d="M47 510h930v91H47Z" fill="url(#net-mesh)"/>
+      <path d="M47 510h930" fill="none" stroke="#e9f4df" stroke-width="10"/>
+      <path d="M47 493v126m930-126v126" fill="none" stroke="#093e3d" stroke-width="12"/>
     </g>
-    <path d="M340 330 Q470 250 600 330" stroke="#fff" stroke-opacity="0.55" stroke-width="16" fill="none" stroke-linecap="round"/>
   </g>
-  <!-- ball -->
-  <circle cx="735" cy="300" r="118" fill="url(#ball)" stroke="#2a3a00" stroke-opacity="0.35" stroke-width="6"/>
-  <path d="M640 230 Q735 300 650 390" stroke="#ffffff" stroke-width="14" fill="none" stroke-linecap="round"/>
-  <path d="M830 220 Q740 300 825 385" stroke="#ffffff" stroke-width="14" fill="none" stroke-linecap="round"/>
+  <g id="emblem" transform="translate(512 512) scale(1) translate(-512 -512)">
+    <g transform="translate(-46 22) rotate(32 512 512)" fill="#073e3b" fill-opacity="0.4">
+      <use href="#racket-head" stroke="#073e3b" stroke-width="35"/>
+      <path d="M450 580h124l-32 160h-60Z"/>
+      <rect x="478" y="727" width="68" height="160" rx="14"/>
+    </g>
+    <g transform="translate(-60 0) rotate(32 512 512)">
+      <path d="M450 580h124l-32 160h-60Zm39 58 23 67 23-67Z" fill="#142e33" fill-rule="evenodd"/>
+      <path d="m462 606 29 112m71-112-29 112" fill="none" stroke="#ff8775" stroke-width="8"/>
+      <rect x="479" y="726" width="66" height="154" rx="12" fill="#e9eddf" stroke="#173c3d" stroke-width="7"/>
+      <path d="m482 745 60 17m-60 8 60 17m-60 8 60 17m-60 8 60 17m-60 8 60 17" fill="none" stroke="#9bafa3" stroke-width="6"/>
+      <rect x="474" y="869" width="76" height="20" rx="7" fill="#ff8775" stroke="#173c3d" stroke-width="5"/>
+      <use href="#racket-head" transform="translate(6 10)" fill="#d15148" stroke="#d15148" stroke-width="39"/>
+      <use href="#racket-head" fill="url(#racket-carbon)" stroke="#f0efdf" stroke-width="29"/>
+      <g clip-path="url(#racket-face)">
+        <path d="M312 438 691 204v62L327 491Zm15 90 366-224v16L336 542Z" fill="#ff8775"/>
+        <path d="M346 314h332v269H346Z" fill="url(#drilled-holes)"/>
+        <path d="m479 246 5 31h56l5-31-19 13-14-23-14 23Z" fill="#f0efdf"/>
+        <path d="M483 568h58" stroke="#f0efdf" stroke-width="7" stroke-linecap="round"/>
+      </g>
+      <use href="#racket-head" fill="none" stroke="#ff8775" stroke-width="11"/>
+      <path d="M371 268c22-51 63-80 114-87" fill="none" stroke="#fffdf2" stroke-width="6" stroke-linecap="round"/>
+    </g>
+    <path d="m839 427-39 76m74-27-33 64" fill="none" stroke="#e9f4df" stroke-width="11" stroke-linecap="round"/>
+    <ellipse cx="764" cy="680" rx="109" ry="104" fill="#073e3b" fill-opacity="0.45"/>
+    <circle cx="750" cy="646" r="111" fill="#264f3c"/>
+    <circle cx="750" cy="646" r="109" fill="url(#ball-felt)"/>
+    <g clip-path="url(#ball-seams)">
+      <circle cx="750" cy="646" r="109" fill="url(#felt-grain)"/>
+      <path d="M676 537c80 29 80 187 0 216m157-216c-79 31-79 187 0 216" fill="none" stroke="#869b47" stroke-opacity="0.55" stroke-width="11"/>
+      <path d="M676 537c80 29 80 187 0 216m157-216c-79 31-79 187 0 216" fill="none" stroke="#fffde6" stroke-width="6"/>
+    </g>
+  </g>
 </svg>

@@ -6,7 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#0a1626" />
-  <title>Padel 3D</title>
+  <title>Padel Royale</title>
+  <link rel="preload" href="fonts/BodoniModa-Italic.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -22,36 +23,51 @@
     <button id="pause-btn" aria-label="Pause">II</button>
     <div id="message" class="message"><div class="msg-title"></div><div class="msg-sub"></div></div>
     <div id="hint"></div>
+    <div id="perfect">Perfect</div>
     <div id="kb-help">WASD / Arrows move &amp; aim · Space drive · K lob · L smash/drop · Q switch · Esc pause</div>
   </div>
 
   <div id="touch" class="hidden">
     <div id="gesture"></div>
     <canvas id="swipe-fx"></canvas>
-    <div id="touch-help">Tap to move · Swipe up to hit · Swipe down to lob · Tiny flick = drop · Fast swipe on a high ball = SMASH</div>
+    <div id="touch-help">Tap where to stand · Swipe to hit · Swipe down to lob · Tiny flick = drop · Fast swipe on a high ball = SMASH</div>
   </div>
 
   <div id="speedlines"></div>
 
   <div id="menu" class="overlay">
-    <div class="panel">
-      <h1>PADEL<span>3D</span></h1>
-      <div class="menu-meta">
-        <div class="money"><i class="coin"></i><span class="money-value">$0</span></div>
-        <div class="meta-item">Racket: <b id="menu-racket"></b></div>
-        <div class="meta-item">Record: <b id="menu-record"></b></div>
-      </div>
-      <div class="label">Opponents</div>
-      <div class="seg" id="diff-seg"></div>
-      <div class="label">Match length</div>
-      <div class="seg" id="fmt-seg"></div>
-      <div class="menu-actions">
-        <button id="play-btn" class="btn primary big">Play</button>
-        <button id="shop-btn" class="btn">Racket Shop</button>
-        <button id="online-btn" class="btn online-btn">Play a Friend Online</button>
-      </div>
-      <div class="toggles">
-        <label><input type="checkbox" id="opt-guides" /> Show landing guides</label>
+    <div class="menu-panel">
+      <header class="logo">
+        <div class="orn" aria-hidden="true">
+          <i></i>
+          <svg class="crown" viewBox="0 0 26 16"><path d="M3 13.5 L1.6 4.2 L7.6 8.4 L13 1.8 L18.4 8.4 L24.4 4.2 L23 13.5 Z" /></svg>
+          <i></i>
+        </div>
+        <h1><span class="l1">Padel</span><span class="l2">Royale</span></h1>
+      </header>
+      <div class="menu-body">
+        <div class="profile">
+          <canvas id="menu-racket-art" width="104" height="188"></canvas>
+          <div class="profile-info">
+            <div class="profile-racket" id="menu-racket"></div>
+            <div class="profile-record" id="menu-record"></div>
+          </div>
+          <div class="money"><span class="money-value">$0</span></div>
+        </div>
+        <div class="field">
+          <div class="label">Opponent</div>
+          <div class="seg" id="diff-seg"></div>
+        </div>
+        <div class="field">
+          <div class="label">Match</div>
+          <div class="seg" id="fmt-seg"></div>
+        </div>
+        <button id="play-btn" class="btn play-btn">Play</button>
+        <div class="menu-links">
+          <button id="shop-btn" class="btn">Racket Shop</button>
+          <button id="online-btn" class="btn">Play a Friend</button>
+        </div>
+        <label class="toggle">Landing guides<input type="checkbox" id="opt-guides" class="switch" /></label>
       </div>
     </div>
   </div>
@@ -76,7 +92,7 @@
       <p class="note">Head to head online — you each control a pair. Rackets are level online: your racket shows, its stats don't count.</p>
       <div id="online-choose">
         <button id="host-btn" class="btn primary big">Create game</button>
-        <div class="label">Match length: <b id="online-fmt"></b></div>
+        <p class="note">Match length: <b id="online-fmt"></b></p>
         <div class="label">Got a code?</div>
         <div class="join-row">
           <input id="join-code" maxlength="5" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text" />

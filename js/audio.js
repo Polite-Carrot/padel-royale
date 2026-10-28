@@ -215,6 +215,16 @@ export class Sfx {
     }
   }
 
+  // A bright two-note chime for a PERFECT strike.
+  perfect() {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime;
+    const o = this.out(0, 0.3);
+    this.tone(o, t, { type: 'triangle', f0: 1318, peak: 0.16, attack: 0.005, decay: 0.16 });
+    this.tone(o, t + 0.07, { type: 'triangle', f0: 1976, peak: 0.14, attack: 0.005, decay: 0.32 });
+    this.tone(o, t + 0.07, { f0: 3952, peak: 0.03, attack: 0.005, decay: 0.2 });
+  }
+
   ooh() {
     if (!this.ready) return;
     const t = this.ctx.currentTime;
